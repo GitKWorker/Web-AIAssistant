@@ -226,10 +226,21 @@ function rememberClientMsg(clientMsgId, message) {
 function publicMe(session) {
   return {
     username: session.username,
+    role: accounts.isAdmin(session.username) ? 'admin' : 'member',
     deviceName: session.deviceName,
     displayName: session.displayName,
     deviceKey: session.deviceKey,
   };
+}
+
+function requireAdmin(req, res) {
+  const session = requireSession(req, res);
+  if (!session) return null;
+  if (!accounts.isAdmin(session.username)) {
+    fail(res, 403, 'FORBIDDEN', '仅管理员可以管理账号');
+    return null;
+  }
+  return session;
 }
 
 async function handleRegister(req, res) {
@@ -321,6 +332,144 @@ async function handleAccountUpdate(req, res, session) {
   if (renaming) sessions.destroyByUsername(nextUsername);
 
   return sendJson(res, 200, { ok: true, relogin: true });
+}
+
+/* ---------------- 用户管理（仅管理员） ---------------- */
+
+const NAME_RULE_TEXT = '用户名需为 2-16 位，支持中文、字母、数字、下划线和短横线';
+const PASSWORD_RULE_TEXT = '密码长度需为 6-32 位';
+
+function onlineCountByUser() {
+  const map = new Map();
+  for (const member of sessions.members()) {
+    map.set(member.username, (map.get(member.username) || 0) + 1);
+  }
+  return map;
+}
+
+function userPayload(user, onlineMap) {
+  return {
+    username: user.username,
+    role: user.role,
+    createdAt: user.createdAt,
+    updatedAt: user.updatedAt,
+    online: onlineMap ? onlineMap.get(user.username) || 0 : 0,
+  };
+}
+
+async function handleUserList(req, res) {
+  const session = requireAdmin(req, res);
+  if (!session) return undefined;
+  const onlineMap = onlineCountByUser();
+  return sendJson(res, 200, {
+    users: accounts.list().map((user) => userPayload(user, onlineMap)),
+    me: publicMe(session),
+    limits: { maxAccounts: LIMITS.maxAccounts, maxOnline: LIMITS.maxOnline },
+  });
+}
+
+async function handleUserCreate(req, res) {
+  const session = requireAdmin(req, res);
+  if (!session) return undefined;
+  const body = await readBody(req);
+  const username = String(body.username || '').trim();
+  const password = String(body.password || '');
+  const role = body.role === 'admin' ? 'admin' : 'member';
+
+  if (!NAME_RE.test(username)) return fail(res, 400, 'INVALID_INPUT', NAME_RULE_TEXT);
+  if (password.length < 6 || password.length > 32) {
+    return fail(res, 400, 'INVALID_INPUT', PASSWORD_RULE_TEXT);
+  }
+  if (accounts.findByUsername(username)) {
+    return fail(res, 409, 'USERNAME_TAKEN', '该用户名已被使用');
+  }
+  if (accounts.count() >= LIMITS.maxAccounts) {
+    return fail(res, 400, 'ACCOUNT_LIMIT', `账号数量已达上限（${LIMITS.maxAccounts}）`);
+  }
+
+  const user = accounts.create({ username, password, role });
+  return sendJson(res, 200, { ok: true, user: userPayload(user, onlineCountByUser()) });
+}
+
+async function handleUserUpdate(req, res, target) {
+  const session = requireAdmin(req, res);
+  if (!session) return undefined;
+  const account = accounts.findByUsername(target);
+  if (!account) return fail(res, 404, 'NOT_FOUND', '用户不存在');
+
+  const body = await readBody(req);
+  const hasName = Object.prototype.hasOwnProperty.call(body, 'username');
+  const hasPassword = Object.prototype.hasOwnProperty.call(body, 'password');
+  const hasRole = Object.prototype.hasOwnProperty.call(body, 'role');
+
+  const nextName = hasName ? String(body.username || '').trim() : '';
+  const nextPassword = hasPassword ? String(body.password || '') : '';
+  const nextRole = hasRole ? String(body.role || '') : '';
+  const renaming = !!nextName && nextName !== account.username;
+
+  if (renaming && !NAME_RE.test(nextName)) {
+    return fail(res, 400, 'INVALID_INPUT', NAME_RULE_TEXT);
+  }
+  if (renaming && accounts.findByUsername(nextName)) {
+    return fail(res, 409, 'USERNAME_TAKEN', '该用户名已被使用');
+  }
+  if (nextPassword && (nextPassword.length < 6 || nextPassword.length > 32)) {
+    return fail(res, 400, 'INVALID_INPUT', PASSWORD_RULE_TEXT);
+  }
+  if (nextRole && nextRole !== 'admin' && nextRole !== 'member') {
+    return fail(res, 400, 'INVALID_INPUT', '角色只能是管理员或普通成员');
+  }
+  if (!renaming && !nextPassword && !nextRole) {
+    return fail(res, 400, 'INVALID_INPUT', '没有需要修改的内容');
+  }
+  if (
+    nextRole === 'member' &&
+    account.role === 'admin' &&
+    accounts.adminCount() <= 1
+  ) {
+    return fail(res, 400, 'LAST_ADMIN', '至少要保留一个管理员，无法取消该账号的管理员身份');
+  }
+
+  const previousName = account.username;
+  const isSelf = previousName === session.username;
+
+  accounts.update(previousName, {
+    username: renaming ? nextName : null,
+    password: nextPassword || null,
+    role: nextRole || null,
+  });
+
+  let kicked = 0;
+  if (renaming) kicked += sessions.destroyByUsername(previousName);
+  if (nextPassword) kicked += sessions.destroyByUsername(account.username);
+  if (kicked > 0) broadcast('online', { online: sessions.count() });
+
+  const updated = accounts.findByUsername(account.username);
+  return sendJson(res, 200, {
+    ok: true,
+    user: userPayload(updated || account, onlineCountByUser()),
+    kicked,
+    relogin: isSelf && (renaming || !!nextPassword),
+  });
+}
+
+async function handleUserDelete(req, res, target) {
+  const session = requireAdmin(req, res);
+  if (!session) return undefined;
+  const account = accounts.findByUsername(target);
+  if (!account) return fail(res, 404, 'NOT_FOUND', '用户不存在');
+  if (account.username === session.username) {
+    return fail(res, 400, 'SELF_DELETE', '不能删除当前登录的账号');
+  }
+  if (account.role === 'admin' && accounts.adminCount() <= 1) {
+    return fail(res, 400, 'LAST_ADMIN', '至少要保留一个管理员，无法删除该账号');
+  }
+
+  const removed = accounts.remove(account.username);
+  const kicked = sessions.destroyByUsername(account.username);
+  if (kicked > 0) broadcast('online', { online: sessions.count() });
+
+  return sendJson(res, 200, { ok: true, removed: removed.username, kicked });
 }
 
 async function handleMessages(req, res, url, session) {
@@ -451,6 +600,26 @@ async function handleApi(req, res, url) {
     const session = requireSession(req, res);
     if (!session) return undefined;
     return handleAccountUpdate(req, res, session);
+  }
+
+  if (route === 'GET /api/users') {
+    return handleUserList(req, res);
+  }
+
+  if (route === 'POST /api/users') {
+    return handleUserCreate(req, res);
+  }
+
+  if (url.pathname.indexOf('/api/users/') === 0) {
+    let target = '';
+    try {
+      target = decodeURIComponent(url.pathname.slice('/api/users/'.length)).trim();
+    } catch {
+      target = '';
+    }
+    if (!target) return fail(res, 400, 'INVALID_INPUT', '缺少用户名');
+    if (req.method === 'PATCH') return handleUserUpdate(req, res, target);
+    if (req.method === 'DELETE') return handleUserDelete(req, res, target);
   }
 
   return fail(res, 404, 'NOT_FOUND', '接口不存在');

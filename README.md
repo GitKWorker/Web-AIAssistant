@@ -32,12 +32,16 @@ docker compose up -d            # 或：docker run -d --name ai-assistant -p 308
 - **保留策略**：服务端最多保留 30 天、且最多 10000 条，超出按时间与条数双重清理
 - **复制**：每条消息右侧有复制按钮，点击复制整条消息内容
 - **系统设置**：改用户名 / 密码（需验证当前密码）、消息显示条数、设备名、清空本地偏好、退出登录
+- **用户管理**（仅管理员）：在「系统设置 → 用户管理」里增加、编辑、删除账号，可设置管理员 / 普通成员，列表显示角色与在线状态；删除或改密后该用户在线会话立即失效
 
 ## 账号
 
-- 登录页可「创建账号」自助注册（2-16 位用户名，6-32 位密码）
+- 角色分两级：**管理员**（可管理所有账号）与**普通成员**（只能改自己的用户名 / 密码）
+- 第一个初始账号 `admin` 是管理员；老数据升级时，若没有任何管理员，会自动把 `admin`（或第一个账号）提升为管理员
+- 登录页可「创建账号」自助注册（2-16 位用户名，6-32 位密码），新注册账号默认是普通成员
+- 保护措施：不能删除当前登录的账号；至少保留一个管理员（最后一个管理员不能降级或删除）；账号总数上限 50
 - 密码使用 scrypt + 随机盐哈希存储，不保存明文
-- 修改用户名或密码后，该账号所有会话失效，需要重新登录
+- 修改用户名、密码或角色后，该账号所有会话失效，需要重新登录
 
 ## 接口
 
@@ -52,7 +56,11 @@ docker compose up -d            # 或：docker run -d --name ai-assistant -p 308
 | GET | `/api/messages?afterId=N&limit=50` | 增量拉取（SSE 不可用时的兜底） |
 | GET | `/api/stream?sid=…&afterId=N` | **SSE 实时通道**，事件：`hello` / `backlog` / `message` / `online` |
 | POST | `/api/messages` | 发送消息 |
-| POST | `/api/account` | 修改用户名 / 密码 |
+| POST | `/api/account` | 修改自己的用户名 / 密码 |
+| GET | `/api/users` | **用户列表（仅管理员）**，含角色与在线数 |
+| POST | `/api/users` | **新增用户（仅管理员）**：`{username, password, role}` |
+| PATCH | `/api/users/:name` | **编辑用户（仅管理员）**：`{username?, password?, role?}` |
+| DELETE | `/api/users/:name` | **删除用户（仅管理员）** |
 | GET | `/api/state` | 在线成员与游标 |
 | GET | `/api/config` `GET /api/health` | 配置 / 健康检查 |
 
@@ -63,7 +71,7 @@ docker compose up -d            # 或：docker run -d --name ai-assistant -p 308
 ## 数据
 
 - `data/messages.ndjson`：消息，**一行一条 NDJSON 追加写**（不再整文件重写），崩溃残留的半行在启动时自动跳过；累计冗余超过 `max(200, 条数×25%)` 时原子重写压缩一次（tmp + rename）
-- `data/accounts.json`：账号（scrypt 哈希）
+- `data/accounts.json`：账号（scrypt 哈希 + 角色）
 - `data/messages.json`：旧版全量 JSON，存在时启动自动迁移为 NDJSON 并重命名为 `.bak`
 
 删掉 `data/` 目录即可重置全部数据（重启后会重新生成 admin/admin123）。

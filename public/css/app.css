@@ -549,6 +549,61 @@ input:focus, select:focus, textarea:focus {
 .btn-ghost:hover { border-color: var(--text-3); color: var(--text); }
 .btn-ghost.btn-danger:hover { border-color: var(--danger); color: var(--danger); }
 
+/* ---------- 用户管理 ---------- */
+
+.user-list {
+  margin-top: 14px;
+  border-top: 0.5px solid var(--line);
+}
+
+.user-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 0;
+  border-bottom: 0.5px solid var(--line);
+}
+
+.user-item:last-child { border-bottom: none; padding-bottom: 0; }
+
+.user-main { min-width: 0; flex: 1; }
+
+.user-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text);
+  flex-wrap: wrap;
+}
+
+.user-meta { margin-top: 3px; font-size: 11px; color: var(--text-3); }
+
+.user-actions { display: flex; gap: 6px; flex: 0 0 auto; }
+
+.user-empty { padding: 12px 0; font-size: 11px; color: var(--text-3); }
+
+.role-tag {
+  padding: 1px 6px;
+  border: 0.5px solid var(--line-strong);
+  border-radius: 999px;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--text-3);
+}
+
+.role-tag.is-admin { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
+
+.online-tag {
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--success);
+  background: transparent;
+  border: 0.5px solid currentColor;
+}
+
 /* ---------- 提示 ---------- */
 
 .toast {

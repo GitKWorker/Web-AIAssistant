@@ -139,6 +139,34 @@
           </div>
         </section>
 
+        <section class="card" id="card-users" hidden>
+          <h2>用户管理</h2>
+          <p class="card-sub">仅管理员可见。添加、修改或删除账号；删除或改密后该用户的在线会话会立即失效。</p>
+          <div class="grid2">
+            <label class="field">
+              <span class="field-label">用户名</span>
+              <input id="user-name" type="text" maxlength="16" placeholder="2-16 位">
+            </label>
+            <label class="field">
+              <span class="field-label">密码 <em id="user-password-hint">6-32 位</em></span>
+              <input id="user-password" type="password" maxlength="32" placeholder="6-32 位">
+            </label>
+            <label class="field">
+              <span class="field-label">角色</span>
+              <select id="user-role">
+                <option value="member" selected>普通成员</option>
+                <option value="admin">管理员</option>
+              </select>
+            </label>
+          </div>
+          <div class="card-foot">
+            <span class="inline-msg" id="user-msg"></span>
+            <button type="button" class="btn-ghost" id="user-cancel" hidden>取消编辑</button>
+            <button type="button" class="btn-primary btn-auto" id="user-submit">添加用户</button>
+          </div>
+          <div class="user-list" id="user-list"></div>
+        </section>
+
         <section class="card">
           <h2>显示</h2>
           <div class="row">

@@ -36,6 +36,8 @@
     sseErrors: 0,
     pollTimer: null,
     beatTimer: null,
+    users: [],
+    editingUser: null,
   };
 
   var el = {};
@@ -82,6 +84,15 @@
     el.aboutRetain = $('about-retain');
     el.clearLocal = $('clear-local');
     el.logout = $('logout');
+    el.cardUsers = $('card-users');
+    el.userName = $('user-name');
+    el.userPassword = $('user-password');
+    el.userPasswordHint = $('user-password-hint');
+    el.userRole = $('user-role');
+    el.userMsg = $('user-msg');
+    el.userSubmit = $('user-submit');
+    el.userCancel = $('user-cancel');
+    el.userList = $('user-list');
   }
 
   /* ---------------- 通用 ---------------- */
@@ -369,6 +380,7 @@
     es.addEventListener('online', function (event) {
       var data = parseEvent(event);
       if (data && typeof data.online === 'number') updateOnline(data.online);
+      if (!el.viewSettings.hidden && isAdmin()) loadUsers();
     });
 
     es.onerror = function () {
@@ -740,6 +752,13 @@
     el.setCurrent.value = '';
     el.setNew.value = '';
     el.setConfirm.value = '';
+
+    var admin = isAdmin();
+    el.cardUsers.hidden = !admin;
+    if (admin) {
+      resetUserForm();
+      loadUsers();
+    }
   }
 
   function saveAccount() {
@@ -791,6 +810,233 @@
   function accountError(text) {
     el.accountMsg.textContent = text;
     el.accountMsg.className = 'inline-msg is-error';
+  }
+
+  /* ---------------- 用户管理（仅管理员） ---------------- */
+
+  function isAdmin() {
+    return !!state.me && state.me.role === 'admin';
+  }
+
+  function clearUserMsg() {
+    el.userMsg.textContent = '';
+    el.userMsg.className = 'inline-msg';
+  }
+
+  function userError(text) {
+    el.userMsg.textContent = text;
+    el.userMsg.className = 'inline-msg is-error';
+  }
+
+  function userOk(text) {
+    el.userMsg.textContent = text;
+    el.userMsg.className = 'inline-msg is-ok';
+  }
+
+  function loadUsers() {
+    if (!isAdmin()) return;
+    api('GET', '/api/users')
+      .then(function (data) {
+        state.users = (data && data.users) || [];
+        renderUsers();
+      })
+      .catch(function (err) {
+        if (err.status === 401 || err.status === 403) return;
+        userError(err.message || '用户列表加载失败');
+      });
+  }
+
+  function renderUsers() {
+    el.userList.innerHTML = '';
+    if (!state.users.length) {
+      var empty = document.createElement('div');
+      empty.className = 'user-empty';
+      empty.textContent = '暂无可管理的账号';
+      el.userList.appendChild(empty);
+      return;
+    }
+    for (var i = 0; i < state.users.length; i += 1) {
+      el.userList.appendChild(buildUserRow(state.users[i]));
+    }
+  }
+
+  function buildUserRow(user) {
+    var row = document.createElement('div');
+    row.className = 'user-item';
+
+    var main = document.createElement('div');
+    main.className = 'user-main';
+
+    var nameLine = document.createElement('div');
+    nameLine.className = 'user-name';
+
+    var name = document.createElement('span');
+    name.textContent = user.username;
+    nameLine.appendChild(name);
+
+    if (state.me && user.username === state.me.username) {
+      var meTag = document.createElement('span');
+      meTag.className = 'role-tag';
+      meTag.textContent = '我';
+      nameLine.appendChild(meTag);
+    }
+
+    var roleTag = document.createElement('span');
+    roleTag.className = 'role-tag' + (user.role === 'admin' ? ' is-admin' : '');
+    roleTag.textContent = user.role === 'admin' ? '管理员' : '成员';
+    nameLine.appendChild(roleTag);
+
+    if (user.online > 0) {
+      var onlineTag = document.createElement('span');
+      onlineTag.className = 'online-tag';
+      onlineTag.textContent = '在线 ' + user.online;
+      nameLine.appendChild(onlineTag);
+    }
+
+    var meta = document.createElement('div');
+    meta.className = 'user-meta';
+    meta.textContent = user.updatedAt ? '最近修改 ' + formatTime(user.updatedAt) : '';
+
+    main.appendChild(nameLine);
+    main.appendChild(meta);
+
+    var actions = document.createElement('div');
+    actions.className = 'user-actions';
+
+    var editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.className = 'btn-ghost';
+    editBtn.textContent = '编辑';
+    editBtn.onclick = function () {
+      startEditUser(user.username);
+    };
+
+    var delBtn = document.createElement('button');
+    delBtn.type = 'button';
+    delBtn.className = 'btn-ghost btn-danger';
+    delBtn.textContent = '删除';
+    delBtn.onclick = function () {
+      removeUser(user.username);
+    };
+
+    actions.appendChild(editBtn);
+    actions.appendChild(delBtn);
+
+    row.appendChild(main);
+    row.appendChild(actions);
+    return row;
+  }
+
+  function startEditUser(username) {
+    var target = null;
+    for (var i = 0; i < state.users.length; i += 1) {
+      if (state.users[i].username === username) {
+        target = state.users[i];
+        break;
+      }
+    }
+    if (!target) return;
+    state.editingUser = target.username;
+    el.userName.value = target.username;
+    el.userPassword.value = '';
+    el.userPassword.placeholder = '留空则不修改';
+    el.userPasswordHint.textContent = '留空则不修改';
+    el.userRole.value = target.role;
+    el.userSubmit.textContent = '保存修改';
+    el.userCancel.hidden = false;
+    clearUserMsg();
+    el.userName.focus();
+  }
+
+  function resetUserForm() {
+    state.editingUser = null;
+    el.userName.value = '';
+    el.userPassword.value = '';
+    el.userPassword.placeholder = '6-32 位';
+    el.userPasswordHint.textContent = '6-32 位';
+    el.userRole.value = 'member';
+    el.userSubmit.textContent = '添加用户';
+    el.userCancel.hidden = true;
+    clearUserMsg();
+  }
+
+  function submitUser() {
+    var username = el.userName.value.trim();
+    var password = el.userPassword.value;
+    var role = el.userRole.value;
+    var editing = state.editingUser;
+
+    if (!username) {
+      return userError('请输入用户名');
+    }
+    if (password && (password.length < 6 || password.length > 32)) {
+      return userError('密码需为 6-32 位');
+    }
+    if (!editing && !password) {
+      return userError('请为新用户设置密码');
+    }
+
+    el.userSubmit.disabled = true;
+
+    var request;
+    if (editing) {
+      var payload = { username: username, role: role };
+      if (password) payload.password = password;
+      request = api('PATCH', '/api/users/' + encodeURIComponent(editing), payload);
+    } else {
+      request = api('POST', '/api/users', {
+        username: username,
+        password: password,
+        role: role,
+      });
+    }
+
+    request
+      .then(function (data) {
+        if (data && data.relogin) {
+          userOk('账号信息已更新，请重新登录');
+          setTimeout(signOutForAccountChange, 700);
+          return;
+        }
+        resetUserForm();
+        loadUsers();
+        userOk(editing ? '已保存修改' : '用户已添加');
+      })
+      .catch(function (err) {
+        if (err.status === 401) return;
+        userError(err.message || '操作失败');
+      })
+      .then(function () {
+        el.userSubmit.disabled = false;
+      });
+  }
+
+  function removeUser(username) {
+    if (!window.confirm('确定删除账号「' + username + '」？该用户的在线会话会立即失效。')) {
+      return;
+    }
+    api('DELETE', '/api/users/' + encodeURIComponent(username))
+      .then(function (data) {
+        if (state.editingUser === username) resetUserForm();
+        loadUsers();
+        var kicked = data && data.kicked ? '，已踢出 ' + data.kicked + ' 个会话' : '';
+        userOk('已删除 ' + username + kicked);
+      })
+      .catch(function (err) {
+        if (err.status === 401) return;
+        userError(err.message || '删除失败');
+      });
+  }
+
+  // 改了自己的用户名或密码：清会话回登录页
+  function signOutForAccountChange() {
+    var username = el.userName.value.trim() || (state.me && state.me.username) || '';
+    stopTimers();
+    state.sessionId = null;
+    state.me = null;
+    localStorage.removeItem(STORAGE.session);
+    if (username) localStorage.setItem(STORAGE.username, username);
+    showLogin('账号信息已更新，请用新账号重新登录');
   }
 
   function logout() {
@@ -867,6 +1113,14 @@
     });
 
     el.saveAccount.addEventListener('click', saveAccount);
+    el.userSubmit.addEventListener('click', submitUser);
+    el.userCancel.addEventListener('click', resetUserForm);
+    el.userPassword.addEventListener('keydown', function (event) {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        submitUser();
+      }
+    });
     el.logout.addEventListener('click', logout);
 
     el.clearLocal.addEventListener('click', function () {
