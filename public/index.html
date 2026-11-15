@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI 助手</title>
+<link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+
+<div id="login-view" class="login-wrap">
+  <div class="login-card">
+    <div class="brand">
+      <div class="brand-mark">AI</div>
+      <div>
+        <div class="brand-name">AI 助手</div>
+        <div class="brand-sub">团队消息同步</div>
+      </div>
+    </div>
+
+    <div class="tabs" role="tablist">
+      <button type="button" class="tab is-active" data-mode="login" role="tab">登录</button>
+      <button type="button" class="tab" data-mode="register" role="tab">创建账号</button>
+    </div>
+
+    <form id="auth-form" autocomplete="off" novalidate>
+      <label class="field">
+        <span class="field-label">用户名</span>
+        <input id="auth-username" type="text" maxlength="16" placeholder="2-16 位，中文 / 字母 / 数字" required>
+      </label>
+      <label class="field">
+        <span class="field-label">密码</span>
+        <input id="auth-password" type="password" maxlength="32" placeholder="6-32 位" required>
+      </label>
+      <label class="field" id="device-field">
+        <span class="field-label">设备名 <em>用于区分同一账号的不同设备</em></span>
+        <input id="auth-device" type="text" maxlength="20" placeholder="例如 Windows-PC">
+      </label>
+      <p class="form-error" id="auth-error" hidden></p>
+      <button type="submit" class="btn-primary" id="auth-submit">进入</button>
+    </form>
+
+    <div class="login-foot">最多 20 台设备同时在线 · 消息保留 30 天 / 10000 条</div>
+  </div>
+</div>
+
+<div id="app-view" class="app" hidden>
+  <aside class="sidebar">
+    <div class="brand brand-compact">
+      <div class="brand-mark">AI</div>
+      <div class="brand-name">AI 助手</div>
+    </div>
+
+    <nav class="nav" id="nav">
+      <button type="button" class="nav-item is-active" data-view="chat">
+        <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"><path d="M2.5 3.2h11v7.2h-6.2L4 13.2v-2.8H2.5z"/></svg>
+        <span>消息同步</span>
+      </button>
+      <button type="button" class="nav-item" data-view="settings">
+        <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.6v2M8 12.4v2M1.6 8h2M12.4 8h2M3.5 3.5l1.4 1.4M11.1 11.1l1.4 1.4M12.5 3.5l-1.4 1.4M4.9 11.1l-1.4 1.4"/></svg>
+        <span>系统设置</span>
+      </button>
+    </nav>
+
+    <div class="sidebar-foot">
+      <div class="me">
+        <div class="avatar" id="me-avatar">·</div>
+        <div class="me-text">
+          <div class="me-name" id="me-name">—</div>
+          <div class="me-device" id="me-device">—</div>
+        </div>
+      </div>
+      <div class="me-status">
+        <span class="dot" id="conn-dot"></span>
+        <span id="conn-text">连接中…</span>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <section class="view" id="view-chat">
+      <header class="topbar">
+        <div class="topbar-text">
+          <h1># 公共频道</h1>
+          <p>全体在线成员可见 · 首屏加载最近 3 条</p>
+        </div>
+        <div class="pill"><span class="dot"></span><span id="online-pill">0 / 20</span></div>
+      </header>
+
+      <div class="messages" id="messages"></div>
+
+      <button type="button" class="jump-new" id="jump-new" hidden>有新消息</button>
+
+      <div class="composer">
+        <div class="composer-box">
+          <textarea id="input" rows="1" maxlength="2000" placeholder="输入消息，与所有在线成员同步…"></textarea>
+          <button type="button" class="btn-send" id="send" disabled>发送</button>
+        </div>
+        <div class="composer-hint">
+          <span>Enter 发送 · Shift + Enter 换行</span>
+          <span id="counter">0 / 2000</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="view" id="view-settings" hidden>
+      <header class="topbar">
+        <div class="topbar-text">
+          <h1>系统设置</h1>
+          <p>账号、显示与连接</p>
+        </div>
+      </header>
+
+      <div class="settings">
+        <section class="card">
+          <h2>账号</h2>
+          <p class="card-sub">修改用户名或密码需要验证当前密码，保存后需要重新登录。</p>
+          <div class="grid2">
+            <label class="field">
+              <span class="field-label">用户名</span>
+              <input id="set-username" type="text" maxlength="16">
+            </label>
+            <label class="field">
+              <span class="field-label">当前密码</span>
+              <input id="set-current" type="password" maxlength="32" placeholder="用于验证身份">
+            </label>
+            <label class="field">
+              <span class="field-label">新密码</span>
+              <input id="set-new" type="password" maxlength="32" placeholder="留空则不修改">
+            </label>
+            <label class="field">
+              <span class="field-label">确认新密码</span>
+              <input id="set-confirm" type="password" maxlength="32" placeholder="再次输入新密码">
+            </label>
+          </div>
+          <div class="card-foot">
+            <span class="inline-msg" id="account-msg"></span>
+            <button type="button" class="btn-primary btn-auto" id="save-account">保存修改</button>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>显示</h2>
+          <div class="row">
+            <div class="row-text">
+              <div class="row-title">消息显示条数</div>
+              <div class="row-sub">界面上最多保留的消息数量，超出后自动移除最早的</div>
+            </div>
+            <select id="set-limit">
+              <option value="20">20 条</option>
+              <option value="50" selected>50 条</option>
+              <option value="100">100 条</option>
+            </select>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>设备与连接</h2>
+          <div class="row">
+            <div class="row-text">
+              <div class="row-title">设备名</div>
+              <div class="row-sub">退出登录后重新进入时生效</div>
+            </div>
+            <input id="set-device" type="text" maxlength="20" class="input-inline">
+          </div>
+          <div class="row">
+            <div class="row-text">
+              <div class="row-title">服务器地址</div>
+              <div class="row-sub">当前页面访问地址</div>
+            </div>
+            <span class="row-value" id="set-origin">—</span>
+          </div>
+          <div class="row">
+            <div class="row-text">
+              <div class="row-title">刷新间隔</div>
+              <div class="row-sub">HTTP 轮询获取新消息</div>
+            </div>
+            <span class="row-value">3 秒</span>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>数据</h2>
+          <div class="row">
+            <div class="row-text">
+              <div class="row-title">本地偏好</div>
+              <div class="row-sub">清除显示条数等本地设置，不影响服务器消息</div>
+            </div>
+            <button type="button" class="btn-ghost" id="clear-local">清空</button>
+          </div>
+          <div class="row">
+            <div class="row-text">
+              <div class="row-title">退出登录</div>
+              <div class="row-sub">释放当前在线名额</div>
+            </div>
+            <button type="button" class="btn-ghost btn-danger" id="logout">退出</button>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>关于</h2>
+          <div class="row">
+            <div class="row-text"><div class="row-title">版本</div></div>
+            <span class="row-value">1.0.0</span>
+          </div>
+          <div class="row">
+            <div class="row-text"><div class="row-title">消息保留</div></div>
+            <span class="row-value" id="about-retain">30 天 / 10000 条</span>
+          </div>
+          <div class="row">
+            <div class="row-text"><div class="row-title">在线设备</div></div>
+            <span class="row-value" id="about-online">—</span>
+          </div>
+        </section>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+
+<script src="/js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+{
+  "name": "ai-assistant",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AI 助手 · 轻量团队消息同步工具（纯 HTTP，零依赖）",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
