@@ -1,6 +1,11 @@
 # 运行时数据（账号、消息）
 data/
 
+# 本地密钥（R2 凭据等，绝不入库）
+.env
+.env.local
+.env*.local
+
 # 依赖与日志
 node_modules/
 npm-debug.log*

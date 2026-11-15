@@ -10,8 +10,20 @@ services:
       NODE_OPTIONS: "--max-old-space-size=96"
       # 自助注册默认关闭，账号由管理员创建；临时开回来改成 "1"
       ALLOW_REGISTER: "0"
+      # ---- 文件直传（Cloudflare R2）----
+      # 不填这几项时上传入口整体隐藏，消息功能不受影响。
+      # 建议放到同目录 .env 文件里由 compose 自动读取，避免明文写在这里被提交。
+      R2_ACCOUNT_ID: "${R2_ACCOUNT_ID:-}"
+      R2_ACCESS_KEY: "${R2_ACCESS_KEY:-}"
+      R2_SECRET_KEY: "${R2_SECRET_KEY:-}"
+      R2_BUCKET: "${R2_BUCKET:-aia-files}"
+      R2_PUBLIC_BASE: "${R2_PUBLIC_BASE:-}"
+      R2_MAX_SIZE_MB: "${R2_MAX_SIZE_MB:-100}"
     volumes:
-      - ai-assistant-data:/app/data
+      # 默认用命名卷 ai-assistant-data。想在 NAS 上直接看到/备份数据时，改用宿主机目录：
+      #   AIA_DATA_DIR=/share/CACHEDEV3_DATA/Public/ai-assistant/data
+      # bind mount 前必须先 chown 10001:10001 <目录>，否则容器以 UID 10001 运行时写入会 EACCES。
+      - ${AIA_DATA_DIR:-ai-assistant-data}:/app/data
     # 单进程 Node，20 台设备轮询/SSE 上限，资源天花板给死，防止极端情况拖累宿主
     deploy:
       resources:

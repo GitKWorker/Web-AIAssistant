@@ -39,6 +39,10 @@
     beatTimer: null,
     users: [],
     editingUser: null,
+    fileUpload: false,
+    maxFileMB: 100,
+    retainFileDays: 7,
+    shareTask: null,
   };
 
   var el = {};
@@ -95,6 +99,31 @@
     el.userSubmit = $('user-submit');
     el.userCancel = $('user-cancel');
     el.userList = $('user-list');
+
+    el.attach = $('attach');
+    el.chatFile = $('chat-file');
+    el.uploadQueue = $('upload-queue');
+    el.navFiles = $('nav-files');
+    el.viewFiles = $('view-files');
+    el.filesRetain = $('files-retain');
+    el.shareDrop = $('share-drop');
+    el.shareFile = $('share-file');
+    el.shareHint = $('share-hint');
+    el.shareProgress = $('share-progress');
+    el.spName = $('sp-name');
+    el.spPct = $('sp-pct');
+    el.spFill = $('sp-fill');
+    el.spMeta = $('sp-meta');
+    el.spCancel = $('sp-cancel');
+    el.shareResult = $('share-result');
+    el.srIcon = $('sr-icon');
+    el.srName = $('sr-name');
+    el.srSub = $('sr-sub');
+    el.srUrl = $('sr-url');
+    el.srCopy = $('sr-copy');
+    el.srQr = $('sr-qr');
+    el.srAgain = $('sr-again');
+    el.srOpen = $('sr-open');
   }
 
   /* ---------------- 通用 ---------------- */
@@ -255,6 +284,26 @@
     if (!state.allowRegister && state.authMode === 'register') setAuthMode('login');
   }
 
+  // 服务端未配置 R2 时整体隐藏文件入口，功能消失但不影响消息收发
+  function applyFilePolicy(cfg) {
+    state.fileUpload = Boolean(cfg && cfg.fileUpload);
+    if (cfg && typeof cfg.maxFileMB === 'number' && cfg.maxFileMB > 0) {
+      state.maxFileMB = cfg.maxFileMB;
+    }
+    if (cfg && typeof cfg.retainFileDays === 'number' && cfg.retainFileDays > 0) {
+      state.retainFileDays = cfg.retainFileDays;
+    }
+    if (el.attach) el.attach.hidden = !state.fileUpload;
+    if (el.navFiles) el.navFiles.hidden = !state.fileUpload;
+    if (el.filesRetain) el.filesRetain.textContent = String(state.retainFileDays);
+    if (el.shareHint) {
+      el.shareHint.textContent = state.fileUpload
+        ? '单个文件最大 ' + state.maxFileMB + ' MB · 文件保存 ' + state.retainFileDays + ' 天'
+        : '文件功能未配置，请联系管理员填写 R2 凭据';
+    }
+    if (el.shareDrop) el.shareDrop.classList.toggle('is-disabled', !state.fileUpload);
+  }
+
   function handleAuthSubmit(event) {
     event.preventDefault();
     var username = el.authUsername.value.trim();
@@ -317,7 +366,13 @@
 
     updateOnline(state.online);
     setConnected(true);
-    switchView(window.location.hash === '#settings' ? 'settings' : 'chat');
+    switchView(
+      window.location.hash === '#settings'
+        ? 'settings'
+        : window.location.hash === '#files'
+          ? 'files'
+          : 'chat',
+    );
 
     return loadInitial().then(function () {
       startTimers();
@@ -591,7 +646,12 @@
     renderText(text, message.content);
 
     body.appendChild(head);
-    body.appendChild(text);
+
+    // 纯附件消息的 content 是文件名兜底，正文与卡片重复，省掉正文
+    var hasFile = Boolean(message.file && message.file.url);
+    var textIsName = hasFile && message.content === message.file.name;
+    if (!textIsName) body.appendChild(text);
+    if (hasFile) body.appendChild(buildFileCard(message.file));
 
     var copy = document.createElement('button');
     copy.type = 'button';
@@ -743,6 +803,358 @@
       });
   }
 
+  /* ---------------- 文件 ---------------- */
+
+  function fmtSize(bytes) {
+    var n = Number(bytes) || 0;
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
+    return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+  }
+
+  function fileExt(name) {
+    var m = /\.([A-Za-z0-9]{1,6})$/.exec(String(name || ''));
+    return m ? m[1].toUpperCase() : 'FILE';
+  }
+
+  function isImageMime(mime) {
+    return typeof mime === 'string' && mime.indexOf('image/') === 0;
+  }
+
+  function expireText(ts) {
+    var left = Number(ts) - Date.now();
+    if (!isFinite(left) || left <= 0) return '已过期';
+    var days = Math.floor(left / 86400000);
+    if (days >= 1) return days + ' 天后失效';
+    var hours = Math.floor(left / 3600000);
+    if (hours >= 1) return hours + ' 小时后失效';
+    return '即将失效';
+  }
+
+  // 先向服务端换取一次性上传许可，再由浏览器直传 R2。
+  // 用 XHR 而非 fetch：只有 XHR 能读到上传进度。
+  function uploadToR2(file, scene, onProgress) {
+    return api('POST', '/api/files/sign', {
+      name: file.name,
+      size: file.size,
+      mime: file.type || '',
+      scene: scene,
+    }).then(function (ticket) {
+      return new Promise(function (resolve, reject) {
+        var xhr = new XMLHttpRequest();
+        state.uploadXhr = xhr;
+        xhr.open('PUT', ticket.uploadUrl, true);
+        xhr.setRequestHeader('Content-Type', ticket.contentType);
+        xhr.upload.onprogress = function (event) {
+          if (event.lengthComputable && typeof onProgress === 'function') {
+            onProgress(event.loaded / event.total);
+          }
+        };
+        xhr.onload = function () {
+          state.uploadXhr = null;
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve({
+              key: ticket.key,
+              name: ticket.name,
+              size: file.size,
+              mime: ticket.contentType,
+              url: ticket.publicUrl,
+              expireAt: ticket.expireAt,
+            });
+          } else if (xhr.status === 403) {
+            reject(new Error('上传许可已失效，请重试'));
+          } else {
+            reject(new Error('上传失败（HTTP ' + xhr.status + '）'));
+          }
+        };
+        xhr.onerror = function () {
+          state.uploadXhr = null;
+          reject(new Error('网络中断，上传失败'));
+        };
+        xhr.onabort = function () {
+          state.uploadXhr = null;
+          reject(new Error('已取消上传'));
+        };
+        if (typeof onProgress === 'function') onProgress(0);
+        xhr.send(file);
+      });
+    });
+  }
+
+  function sendFileMessage(meta, note) {
+    return api('POST', '/api/messages', {
+      content: note || '',
+      clientMsgId: uuid(),
+      file: meta,
+    }).then(function (data) {
+      if (data.message) appendMessages([data.message]);
+      updateOnline(data.online);
+      setConnected(true);
+      scrollToBottom();
+    });
+  }
+
+  function buildFileCard(file) {
+    var expired = !file || Date.now() > Number(file.expireAt);
+    var card = document.createElement('div');
+    card.className = 'file-card' + (expired ? ' is-expired' : '');
+
+    if (file && isImageMime(file.mime) && !expired) {
+      var thumb = document.createElement('a');
+      thumb.className = 'file-thumb';
+      thumb.href = file.url;
+      thumb.target = '_blank';
+      thumb.rel = 'noopener';
+      var img = document.createElement('img');
+      img.src = file.url;
+      img.alt = file.name;
+      img.loading = 'lazy';
+      thumb.appendChild(img);
+      card.appendChild(thumb);
+    }
+
+    var main = document.createElement('div');
+    main.className = 'file-main';
+
+    var icon = document.createElement('div');
+    icon.className = 'file-icon';
+    icon.textContent = fileExt(file && file.name);
+
+    var info = document.createElement('div');
+    info.className = 'file-info';
+
+    var title = document.createElement('div');
+    title.className = 'file-name';
+    title.textContent = (file && file.name) || '文件';
+    title.title = title.textContent;
+
+    var sub = document.createElement('div');
+    sub.className = 'file-sub';
+    sub.textContent = expired
+      ? '已过期清理 · ' + fmtSize(file && file.size)
+      : fmtSize(file && file.size) + ' · ' + expireText(file && file.expireAt);
+
+    info.appendChild(title);
+    info.appendChild(sub);
+    main.appendChild(icon);
+    main.appendChild(info);
+
+    if (!expired) {
+      var link = document.createElement('a');
+      link.className = 'file-dl';
+      link.href = file.url;
+      link.target = '_blank';
+      link.rel = 'noopener';
+      link.setAttribute('download', file.name);
+      link.textContent = '下载';
+      main.appendChild(link);
+    }
+
+    card.appendChild(main);
+    return card;
+  }
+
+  function buildQueueRow(file) {
+    var node = document.createElement('div');
+    node.className = 'queue-row';
+
+    var name = document.createElement('span');
+    name.className = 'queue-name';
+    name.textContent = file.name;
+
+    var bar = document.createElement('div');
+    bar.className = 'queue-bar';
+    var fill = document.createElement('div');
+    fill.className = 'queue-fill';
+    bar.appendChild(fill);
+
+    var pct = document.createElement('span');
+    pct.className = 'queue-pct';
+    pct.textContent = '0%';
+
+    node.appendChild(name);
+    node.appendChild(bar);
+    node.appendChild(pct);
+
+    return {
+      node: node,
+      setProgress: function (ratio) {
+        var p = Math.max(0, Math.min(1, ratio || 0));
+        fill.style.width = (p * 100).toFixed(1) + '%';
+        pct.textContent = Math.round(p * 100) + '%';
+      },
+      setDone: function () {
+        node.classList.add('is-done');
+        fill.style.width = '100%';
+        pct.textContent = '完成';
+      },
+      setError: function (msg) {
+        node.classList.add('is-error');
+        pct.textContent = msg;
+      },
+    };
+  }
+
+  function removeQueueRow(node) {
+    if (node && node.parentNode) node.parentNode.removeChild(node);
+    if (el.uploadQueue && !el.uploadQueue.children.length) el.uploadQueue.hidden = true;
+  }
+
+  // 聊天附件：串行上传，逐个显示进度，完成一条发一条消息
+  function pickChatFiles(files) {
+    if (!files || !files.length) return undefined;
+    if (!state.fileUpload) {
+      toast('文件上传未启用');
+      return undefined;
+    }
+    var list = Array.prototype.slice.call(files);
+    el.uploadQueue.hidden = false;
+
+    var chain = Promise.resolve();
+    list.forEach(function (file) {
+      chain = chain.then(function () {
+        var row = buildQueueRow(file);
+        el.uploadQueue.appendChild(row.node);
+
+        if (file.size > state.maxFileMB * 1024 * 1024) {
+          row.setError('超过 ' + state.maxFileMB + ' MB');
+          setTimeout(function () {
+            removeQueueRow(row.node);
+          }, 4000);
+          return undefined;
+        }
+
+        return uploadToR2(file, 'chat', row.setProgress)
+          .then(function (meta) {
+            row.setDone();
+            return sendFileMessage(meta, '');
+          })
+          .then(function () {
+            removeQueueRow(row.node);
+          })
+          .catch(function (err) {
+            if (err && err.status === 401) return;
+            row.setError(err.message || '上传失败');
+            setTimeout(function () {
+              removeQueueRow(row.node);
+            }, 6000);
+          });
+      });
+    });
+    return chain;
+  }
+
+  // 纯文本复制：本部署是 http 明文访问，Clipboard API 在非安全上下文不可用，
+  // 必须回落到 execCommand。这里保留按钮文字而不替换图标。
+  function copyPlain(text, button) {
+    var restore = button.textContent;
+    var done = function () {
+      button.textContent = '已复制';
+      setTimeout(function () {
+        button.textContent = restore;
+      }, 1400);
+    };
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(done, function () {
+        legacyCopy(text, done);
+      });
+      return;
+    }
+    legacyCopy(text, done);
+  }
+
+  /* ---------------- 发文件（独立分享） ---------------- */
+
+  function resetShare() {
+    if (state.uploadXhr) {
+      try {
+        state.uploadXhr.abort();
+      } catch (err) {
+        /* 忽略 */
+      }
+      state.uploadXhr = null;
+    }
+    el.shareDrop.hidden = false;
+    el.shareProgress.hidden = true;
+    el.shareResult.hidden = true;
+    el.shareFile.value = '';
+    el.spFill.style.width = '0%';
+    el.spPct.textContent = '0%';
+    el.srQr.textContent = '';
+    el.shareHint.textContent = state.fileUpload
+      ? '单个文件最大 ' + state.maxFileMB + ' MB · 文件保存 ' + state.retainFileDays + ' 天'
+      : '文件功能未配置，请联系管理员填写 R2 凭据';
+    el.shareDrop.classList.toggle('is-disabled', !state.fileUpload);
+  }
+
+  function startShareUpload(file) {
+    if (!state.fileUpload) return toast('文件上传未启用');
+    if (file.size > state.maxFileMB * 1024 * 1024) {
+      return toast('文件超过 ' + state.maxFileMB + ' MB');
+    }
+
+    el.shareDrop.hidden = true;
+    el.shareResult.hidden = true;
+    el.shareProgress.hidden = false;
+    el.spName.textContent = file.name;
+    el.spMeta.textContent = fmtSize(file.size) + ' · 准备中';
+    el.spFill.style.width = '0%';
+    el.spPct.textContent = '0%';
+
+    var startedAt = 0;
+    uploadToR2(file, 'share', function (ratio) {
+      var p = Math.max(0, Math.min(1, ratio || 0));
+      el.spFill.style.width = (p * 100).toFixed(1) + '%';
+      el.spPct.textContent = Math.round(p * 100) + '%';
+      if (!startedAt && p > 0.02) startedAt = Date.now();
+      if (startedAt && p < 1) {
+        var speed = (file.size * p) / Math.max(0.3, (Date.now() - startedAt) / 1000);
+        var remain = (file.size * (1 - p)) / Math.max(1, speed);
+        el.spMeta.textContent =
+          fmtSize(file.size) + ' · ' + (remain > 1 ? '剩余约 ' + Math.ceil(remain) + ' 秒' : '即将完成');
+      } else if (p >= 1) {
+        el.spMeta.textContent = fmtSize(file.size) + ' · 生成链接…';
+      }
+    })
+      .then(renderShareResult)
+      .catch(function (err) {
+        if (err && err.status === 401) return;
+        el.shareProgress.hidden = true;
+        el.shareDrop.hidden = false;
+        toast(err.message || '上传失败');
+      });
+  }
+
+  function renderShareResult(meta) {
+    el.shareProgress.hidden = true;
+    el.shareDrop.hidden = true;
+    el.shareResult.hidden = false;
+
+    el.srIcon.textContent = fileExt(meta.name);
+    el.srName.textContent = meta.name;
+    el.srName.title = meta.name;
+    el.srSub.textContent =
+      fmtSize(meta.size) + ' · ' + expireText(meta.expireAt) + ' · 保存 ' + state.retainFileDays + ' 天';
+    el.srUrl.value = meta.url;
+    el.srOpen.href = meta.url;
+    el.srCopy.dataset.url = meta.url;
+    renderQr(meta.url);
+  }
+
+  function renderQr(url) {
+    el.srQr.textContent = '';
+    if (typeof window.qrcode !== 'function' || !url) return;
+    try {
+      var qr = window.qrcode(0, 'M');
+      qr.addData(url);
+      qr.make();
+      el.srQr.innerHTML = qr.createSvgTag({ cellSize: 3, margin: 1, scalable: true });
+    } catch (err) {
+      /* 二维码失败不影响链接使用 */
+    }
+  }
+
   /* ---------------- 设置 ---------------- */
 
   function switchView(view) {
@@ -751,12 +1163,16 @@
       items[i].classList.toggle('is-active', items[i].dataset.view === view);
     }
     el.viewChat.hidden = view !== 'chat';
+    el.viewFiles.hidden = view !== 'files';
     el.viewSettings.hidden = view !== 'settings';
     if (window.history && window.history.replaceState) {
-      window.history.replaceState(null, '', view === 'settings' ? '#settings' : '#');
+      var hash = view === 'settings' ? '#settings' : view === 'files' ? '#files' : '#';
+      window.history.replaceState(null, '', hash);
     }
     if (view === 'settings') {
       fillSettings();
+    } else if (view === 'files') {
+      resetShare();
     } else {
       el.input.focus();
     }
@@ -1111,6 +1527,67 @@
 
     el.send.addEventListener('click', sendMessage);
 
+    el.attach.addEventListener('click', function () {
+      el.chatFile.click();
+    });
+
+    el.chatFile.addEventListener('change', function () {
+      pickChatFiles(el.chatFile.files);
+      el.chatFile.value = '';
+    });
+
+    el.shareDrop.addEventListener('click', function () {
+      if (state.fileUpload) el.shareFile.click();
+    });
+
+    el.shareDrop.addEventListener('keydown', function (event) {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        if (state.fileUpload) el.shareFile.click();
+      }
+    });
+
+    el.shareFile.addEventListener('change', function () {
+      if (el.shareFile.files && el.shareFile.files[0]) startShareUpload(el.shareFile.files[0]);
+      el.shareFile.value = '';
+    });
+
+    ['dragenter', 'dragover'].forEach(function (type) {
+      el.shareDrop.addEventListener(type, function (event) {
+        event.preventDefault();
+        if (state.fileUpload) el.shareDrop.classList.add('is-over');
+      });
+    });
+
+    ['dragleave', 'dragend'].forEach(function (type) {
+      el.shareDrop.addEventListener(type, function () {
+        el.shareDrop.classList.remove('is-over');
+      });
+    });
+
+    el.shareDrop.addEventListener('drop', function (event) {
+      event.preventDefault();
+      el.shareDrop.classList.remove('is-over');
+      var dropped = event.dataTransfer && event.dataTransfer.files;
+      if (dropped && dropped[0]) startShareUpload(dropped[0]);
+    });
+
+    el.spCancel.addEventListener('click', function () {
+      if (state.uploadXhr) {
+        try {
+          state.uploadXhr.abort();
+        } catch (err) {
+          /* 忽略 */
+        }
+      }
+    });
+
+    el.srAgain.addEventListener('click', resetShare);
+
+    el.srCopy.addEventListener('click', function () {
+      copyPlain(el.srUrl.value, el.srCopy);
+    });
+
     el.messages.addEventListener('scroll', function () {
       if (isNearBottom()) el.jumpNew.hidden = true;
     });
@@ -1188,9 +1665,11 @@
       .then(function (cfg) {
         if (cfg && typeof cfg.maxOnline === 'number') state.maxOnline = cfg.maxOnline;
         applyRegisterPolicy(cfg && cfg.allowRegister);
+        applyFilePolicy(cfg);
       })
       .catch(function () {
         applyRegisterPolicy(false);
+        applyFilePolicy(null);
       });
 
     var savedSession = localStorage.getItem(STORAGE.session);

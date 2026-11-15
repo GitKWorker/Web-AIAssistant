@@ -3,6 +3,10 @@
 data
 screenshots
 docs
+scripts
+.env
+.env.local
+.env*.local
 *.md
 Dockerfile
 docker-compose.yml

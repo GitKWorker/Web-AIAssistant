@@ -641,3 +641,235 @@ input:focus, select:focus, textarea:focus {
   .row { flex-wrap: wrap; }
   .input-inline { flex: 1 0 100%; width: 100%; }
 }
+
+/* ---------- 文件上传 ---------- */
+
+.btn-attach {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  margin-bottom: 2px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  transition: color 120ms, background 120ms;
+}
+.btn-attach:hover { color: var(--accent); background: var(--accent-soft); }
+
+.upload-queue {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.queue-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 0.5px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-size: 12px;
+}
+.queue-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-2);
+}
+.queue-bar {
+  flex: 0 0 90px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+.queue-fill {
+  width: 0;
+  height: 100%;
+  background: var(--accent);
+  transition: width 160ms linear;
+}
+.queue-pct { flex: 0 0 auto; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.queue-row.is-done .queue-fill { background: var(--success); }
+.queue-row.is-done .queue-pct { color: var(--success); }
+.queue-row.is-error .queue-fill { width: 100%; background: var(--danger); }
+.queue-row.is-error .queue-pct { color: var(--danger); }
+
+/* 消息内文件卡片 */
+
+.file-card {
+  margin-top: 6px;
+  max-width: 420px;
+  border: 0.5px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.file-thumb { display: block; background: var(--surface-3); }
+.file-thumb img { display: block; width: 100%; height: auto; max-height: 180px; object-fit: cover; }
+.file-main { display: flex; align-items: center; gap: 10px; padding: 9px 11px; }
+.file-icon {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+.file-info { flex: 1; min-width: 0; }
+.file-name {
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-sub { font-size: 11px; color: var(--text-3); }
+.file-dl {
+  flex: 0 0 auto;
+  height: 26px;
+  padding: 0 10px;
+  display: inline-flex;
+  align-items: center;
+  border: 0.5px solid var(--accent-line);
+  border-radius: var(--radius-sm);
+  color: var(--accent);
+  font-size: 12px;
+  text-decoration: none;
+}
+.file-dl:hover { background: var(--accent-soft); }
+.file-card.is-expired .file-icon { background: var(--surface-3); color: var(--text-3); }
+.file-card.is-expired .file-name { color: var(--text-3); text-decoration: line-through; }
+
+/* 发文件页 */
+
+.files-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  width: 100%;
+  max-width: 620px;
+  margin: 0 auto;
+  padding: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 44px 20px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface-2);
+  color: var(--text-2);
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 130ms, background 130ms, color 130ms;
+}
+.dropzone:hover,
+.dropzone.is-over { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.dropzone.is-disabled { cursor: not-allowed; opacity: 0.6; }
+.dropzone-icon { color: var(--text-3); }
+.dropzone:hover .dropzone-icon,
+.dropzone.is-over .dropzone-icon { color: var(--accent); }
+.dropzone-title { font-size: 13px; }
+.dropzone-sub { font-size: 11.5px; color: var(--text-3); }
+
+.share-progress,
+.share-result {
+  padding: 14px 16px;
+  border: 0.5px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface-2);
+}
+
+.sp-head { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.sp-name { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sp-pct { flex: 0 0 auto; font-size: 12px; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.sp-bar { height: 6px; border-radius: 3px; background: var(--surface-3); overflow: hidden; }
+.sp-fill { width: 0; height: 100%; background: var(--accent); transition: width 160ms linear; }
+.sp-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; }
+.sp-meta { font-size: 11.5px; color: var(--text-3); }
+
+.sr-file { display: flex; align-items: center; gap: 10px; }
+.sr-icon {
+  flex: 0 0 auto;
+  width: 38px;
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 9px;
+  font-weight: 500;
+}
+.sr-meta { min-width: 0; }
+.sr-name { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sr-sub { font-size: 11.5px; color: var(--text-3); }
+
+.sr-link { display: flex; gap: 8px; margin-top: 14px; }
+.sr-link input {
+  flex: 1;
+  min-width: 0;
+  height: 34px;
+  padding: 0 10px;
+  border: 0.5px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+/* 二维码固定白底：暗色模式下黑模块落在深色背景上会扫不出来 */
+.sr-qr {
+  display: flex;
+  justify-content: center;
+  width: 164px;
+  margin: 14px auto 0;
+  padding: 8px;
+  background: #ffffff;
+  border: 0.5px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.sr-qr:empty { display: none; }
+.sr-qr svg { display: block; width: 148px; height: 148px; }
+
+.sr-foot { display: flex; gap: 8px; margin-top: 14px; }
+
+.btn-sm {
+  height: 28px;
+  padding: 0 10px;
+  display: inline-flex;
+  align-items: center;
+  font-size: 12px;
+  text-decoration: none;
+}
+
+@media (max-width: 640px) {
+  .files-body { padding: 14px; }
+  .dropzone { padding: 32px 16px; }
+  .file-card { max-width: none; }
+  .queue-bar { flex: 0 0 56px; }
+}

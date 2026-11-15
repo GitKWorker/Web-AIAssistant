@@ -5,9 +5,31 @@ const fs = require('node:fs');
 const path = require('node:path');
 const zlib = require('node:zlib');
 
+// 本地开发时自动读取 .env.local（该文件被 .gitignore 与 .dockerignore 双重排除）。
+// 生产环境通过 docker -e 注入变量，镜像内不包含任何密钥文件。
+// 必须在 require('./lib/r2') 之前执行，因为该模块会缓存读取到的环境变量。
+(function loadLocalEnv() {
+  try {
+    const file = path.join(__dirname, '.env.local');
+    if (!fs.existsSync(file)) return;
+    for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+      const text = line.trim();
+      if (!text || text.startsWith('#')) continue;
+      const eq = text.indexOf('=');
+      if (eq < 1) continue;
+      const key = text.slice(0, eq).trim();
+      const value = text.slice(eq + 1).trim().replace(/^["']|["']$/g, '');
+      if (!(key in process.env)) process.env[key] = value;
+    }
+  } catch {
+    // 读取失败不影响启动，走纯环境变量
+  }
+})();
+
 const { MessageStore } = require('./lib/store');
 const { SessionManager } = require('./lib/sessions');
 const { AccountStore } = require('./lib/accounts');
+const r2 = require('./lib/r2');
 
 const PORT = Number(process.env.PORT || 3080);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -26,7 +48,10 @@ const LIMITS = {
   maxContent: 2000,
   rateCount: 10,
   rateWindowMs: 10000,
+  maxFileMB: Math.max(1, Number(process.env.R2_MAX_SIZE_MB || 100)),
 };
+
+const RETAIN_DAYS = r2.RETAIN_DAYS;
 
 const GZIP_MIN = 512;
 const STREAM_PING_MS = 10000;
@@ -484,6 +509,92 @@ async function handleUserDelete(req, res, target) {
   return sendJson(res, 200, { ok: true, removed: removed.username, kicked });
 }
 
+// 签发一次性的上传许可。文件字节不经过本服务，直接由浏览器 PUT 到 R2。
+async function handleFileSign(req, res, session) {
+  if (!r2.isConfigured()) {
+    return fail(res, 503, 'FILE_UPLOAD_DISABLED', '文件上传功能未启用');
+  }
+
+  let body;
+  try {
+    body = await readBody(req, 8 * 1024);
+  } catch (err) {
+    return fail(res, 400, 'INVALID_INPUT', err.message === 'BODY_TOO_LARGE' ? '请求体过大' : '请求格式错误');
+  }
+
+  const scene = body.scene === 'share' ? 'share' : 'chat';
+  const size = Number(body.size);
+  if (!Number.isFinite(size) || size <= 0) {
+    return fail(res, 400, 'INVALID_INPUT', '文件大小无效');
+  }
+  if (size > r2.r2Env().maxBytes) {
+    return fail(res, 413, 'FILE_TOO_LARGE', `单个文件不能超过 ${LIMITS.maxFileMB} MB`);
+  }
+
+  if (rateLimited(`file:${session.deviceKey}`)) {
+    return fail(res, 429, 'RATE_LIMITED', '上传太频繁了，请稍后再试');
+  }
+
+  const name = r2.sanitizeFilename(body.name);
+  const contentType = r2.safeMime(body.mime);
+  const key = r2.buildObjectKey(scene, name);
+
+  let signed;
+  try {
+    signed = r2.presignPut(key, contentType);
+  } catch (err) {
+    console.error('[files] 签名失败：', err.message);
+    return fail(res, 500, 'SIGN_FAILED', '签发上传许可失败');
+  }
+
+  return sendJson(res, 200, {
+    uploadUrl: signed.uploadUrl,
+    publicUrl: signed.publicUrl,
+    key,
+    name,
+    contentType,
+    size,
+    expiresIn: signed.expiresIn,
+    expireAt: Date.now() + RETAIN_DAYS * 24 * 60 * 60 * 1000,
+    retainDays: RETAIN_DAYS,
+  });
+}
+
+// 校验前端回传的文件元数据：只接受我们自己签出的 key 前缀，且 URL 必须落在公开域上，
+// 避免客户端伪造一条指向外站的「文件消息」。
+function normalizeIncomingFile(input) {
+  if (!input || typeof input !== 'object') return null;
+  if (!r2.isConfigured()) return null;
+
+  const key = String(input.key || '');
+  if (!/^[cs]\/[0-9a-f]{32}\//.test(key)) return null;
+
+  const url = String(input.url || '');
+  const base = r2.publicBase();
+  if (!base || !url.startsWith(`${base}/`)) return null;
+
+  const size = Number(input.size);
+  if (!Number.isFinite(size) || size <= 0 || size > r2.r2Env().maxBytes) return null;
+
+  const name = r2.sanitizeFilename(input.name);
+  if (!name) return null;
+
+  const expireAt = Number(input.expireAt);
+  const ttl = RETAIN_DAYS * 24 * 60 * 60 * 1000;
+  return {
+    key,
+    name,
+    size,
+    mime: r2.safeMime(input.mime),
+    url,
+    // 不信任客户端给的过期时间，最多按保留期上界截断
+    expireAt:
+      Number.isFinite(expireAt) && expireAt > Date.now()
+        ? Math.min(expireAt, Date.now() + ttl)
+        : Date.now() + ttl,
+  };
+}
+
 async function handleMessages(req, res, url, session) {
   if (req.method === 'GET') {
     const afterRaw = url.searchParams.get('afterId');
@@ -509,8 +620,11 @@ async function handleMessages(req, res, url, session) {
   }
 
   const body = await readBody(req);
+  const file = normalizeIncomingFile(body.file);
   const raw = typeof body.content === 'string' ? body.content : '';
-  const content = raw.replace(/\r\n/g, '\n').trim();
+  let content = raw.replace(/\r\n/g, '\n').trim();
+  // 纯附件消息没有文字，用文件名兜底，保证 content 非空（搜索、复制、通知都有内容可显示）
+  if (!content && file) content = file.name;
   if (!content) {
     return fail(res, 400, 'INVALID_INPUT', '消息不能为空');
   }
@@ -537,6 +651,7 @@ async function handleMessages(req, res, url, session) {
     displayName: session.displayName,
     content,
     clientMsgId,
+    file,
   });
   rememberClientMsg(clientMsgId, message);
 
@@ -559,7 +674,15 @@ async function handleApi(req, res, url) {
     case 'POST /api/logout':
       return handleLogout(req, res, url);
     case 'GET /api/config':
-      return sendJson(res, 200, Object.assign({}, LIMITS, { allowRegister: registerAllowed() }));
+      return sendJson(
+        res,
+        200,
+        Object.assign({}, LIMITS, {
+          allowRegister: registerAllowed(),
+          fileUpload: r2.isConfigured(),
+          retainFileDays: RETAIN_DAYS,
+        }),
+      );
     case 'GET /api/stream':
       return openStream(req, res, url);
     case 'GET /api/health':
@@ -600,6 +723,12 @@ async function handleApi(req, res, url) {
       cursor: store.messages.length ? store.messages[store.messages.length - 1].id : 0,
       serverTime: Date.now(),
     });
+  }
+
+  if (route === 'POST /api/files/sign') {
+    const session = requireSession(req, res);
+    if (!session) return undefined;
+    return handleFileSign(req, res, session);
   }
 
   if (route === 'GET /api/messages' || route === 'POST /api/messages') {
