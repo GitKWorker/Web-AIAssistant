@@ -5,15 +5,22 @@
 #
 ARG NODE_IMAGE=node:22-alpine
 ARG BASE_IMAGE=alpine:3.24
+# 国内网络访问 dl-cdn.alpinelinux.org 常超时，构建期换阿里云源；海外拉取可改成 mirrors.alpinelinux.org
+ARG APK_MIRROR=mirrors.aliyun.com
 
 # ---------- 阶段 1：取 node 二进制 ----------
 FROM ${NODE_IMAGE} AS nodebin
 
-RUN apk add --no-cache binutils >/dev/null 2>&1 || echo '[build] binutils 不可用，跳过 strip'
+ARG APK_MIRROR
+
+RUN sed -i "s#dl-cdn.alpinelinux.org#${APK_MIRROR}#g" /etc/apk/repositories \
+ && (apk add --no-cache binutils >/dev/null 2>&1 || echo '[build] binutils 装不上，退回未 strip 的 node')
+
 RUN cp /usr/local/bin/node /tmp/node \
  && (strip --strip-all /tmp/node 2>/dev/null || echo '[build] strip 跳过') \
- && printf '[build] node 二进制大小：' && du -h /tmp/node | cut -f1 \
- && printf '[build] 动态库依赖：\n' && ldd /tmp/node || true
+ && printf '[build] node: ' && du -h /tmp/node | cut -f1 \
+ && printf '[build] 依赖库: ' && (ldd /tmp/node | awk '{print $1}' | tr '\n' ' ') && echo \
+ && ls -l /usr/lib/libstdc++.so.6 /usr/lib/libgcc_s.so.1
 
 # ---------- 阶段 2：运行时 ----------
 FROM ${BASE_IMAGE}

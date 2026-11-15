@@ -565,7 +565,7 @@ if (housekeeping.unref) housekeeping.unref();
 server.listen(PORT, HOST, () => {
   console.log(`AI 助手已启动：http://localhost:${PORT}`);
   console.log(`局域网访问：http://<本机IP>:${PORT}`);
-  console.log(`保留策略：${LIMITS.retainDays} 天 / ${LIMITS.maxMessages} 条 · 在线上限 ${LIMITS.maxOnline} 台设备 · SSE 推送（轮询兵底）`);
+  console.log(`保留策略：${LIMITS.retainDays} 天 / ${LIMITS.maxMessages} 条 · 在线上限 ${LIMITS.maxOnline} 台设备 · SSE 推送（轮询兜底）`);
   console.log(`存储：NDJSON 追加写 · 当前 ${store.messages.length} 条`);
 });
 
