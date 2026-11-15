@@ -12,6 +12,10 @@ const { AccountStore } = require('./lib/accounts');
 const PORT = Number(process.env.PORT || 3080);
 const HOST = process.env.HOST || '0.0.0.0';
 
+// 自助注册默认关闭：账号一律由管理员在「系统设置 → 用户管理」里创建。
+// 需要开回来自助注册时，启动时带上 ALLOW_REGISTER=1。
+const ALLOW_REGISTER = /^(1|true|yes|on)$/i.test(String(process.env.ALLOW_REGISTER || ''));
+
 const LIMITS = {
   maxOnline: 20,
   maxAccounts: 50,
@@ -243,7 +247,15 @@ function requireAdmin(req, res) {
   return session;
 }
 
+// 账号库为空时永远放行，避免误配置导致谁也建不了号（首次启动会自动建 admin，正常不会走到这里）
+function registerAllowed() {
+  return ALLOW_REGISTER || accounts.count() === 0;
+}
+
 async function handleRegister(req, res) {
+  if (!registerAllowed()) {
+    return fail(res, 403, 'REGISTER_DISABLED', '自助注册已关闭，请联系管理员开通账号');
+  }
   const body = await readBody(req);
   const username = String(body.username || '').trim();
   const password = String(body.password || '');
@@ -547,7 +559,7 @@ async function handleApi(req, res, url) {
     case 'POST /api/logout':
       return handleLogout(req, res, url);
     case 'GET /api/config':
-      return sendJson(res, 200, LIMITS);
+      return sendJson(res, 200, Object.assign({}, LIMITS, { allowRegister: registerAllowed() }));
     case 'GET /api/stream':
       return openStream(req, res, url);
     case 'GET /api/health':
@@ -736,6 +748,9 @@ server.listen(PORT, HOST, () => {
   console.log(`局域网访问：http://<本机IP>:${PORT}`);
   console.log(`保留策略：${LIMITS.retainDays} 天 / ${LIMITS.maxMessages} 条 · 在线上限 ${LIMITS.maxOnline} 台设备 · SSE 推送（轮询兜底）`);
   console.log(`存储：NDJSON 追加写 · 当前 ${store.messages.length} 条`);
+  console.log(
+    `账号：${accounts.count()} 个 · 自助注册${registerAllowed() ? '已开启' : '已关闭（由管理员创建）'}`,
+  );
 });
 
 function shutdown() {

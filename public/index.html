@@ -20,7 +20,7 @@
 
     <div class="tabs" role="tablist">
       <button type="button" class="tab is-active" data-mode="login" role="tab">登录</button>
-      <button type="button" class="tab" data-mode="register" role="tab">创建账号</button>
+      <button type="button" class="tab" data-mode="register" role="tab" hidden>创建账号</button>
     </div>
 
     <form id="auth-form" autocomplete="off" novalidate>
@@ -40,7 +40,7 @@
       <button type="submit" class="btn-primary" id="auth-submit">进入</button>
     </form>
 
-    <div class="login-foot">最多 20 台设备同时在线 · 消息保留 30 天 / 10000 条</div>
+    <div class="login-foot" id="login-foot">最多 20 台设备同时在线 · 消息保留 30 天 / 10000 条</div>
   </div>
 </div>
 

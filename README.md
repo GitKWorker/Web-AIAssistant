@@ -6,13 +6,14 @@
 
 ```bash
 cd ai-assistant
-npm start          # 默认 http://localhost:3080
-PORT=8080 npm start # 换端口
+npm start                 # 默认 http://localhost:3080
+PORT=8080 npm start        # 换端口
+ALLOW_REGISTER=1 npm start # 临时开回登录页的自助注册（默认关闭）
 ```
 
 局域网访问：`http://<本机IP>:3080`。HTTPS 请自行在反向代理层（Nginx / Caddy）配置，程序本身只监听 HTTP。
 
-首次启动会自动创建账号 **admin / admin123**，登录后请到「系统设置 → 账号」改掉。
+首次启动会自动创建账号 **admin / admin123**，登录后请到「系统设置 → 账号」改掉。其余账号由管理员在「系统设置 → 用户管理」里创建（自助注册默认关闭）。
 
 ### Docker 部署（极简 Alpine 镜像）
 
@@ -38,7 +39,7 @@ docker compose up -d            # 或：docker run -d --name ai-assistant -p 308
 
 - 角色分两级：**管理员**（可管理所有账号）与**普通成员**（只能改自己的用户名 / 密码）
 - 第一个初始账号 `admin` 是管理员；老数据升级时，若没有任何管理员，会自动把 `admin`（或第一个账号）提升为管理员
-- 登录页可「创建账号」自助注册（2-16 位用户名，6-32 位密码），新注册账号默认是普通成员
+- **自助注册默认关闭**：登录页只有「登录」，账号一律由管理员在「系统设置 → 用户管理」里创建（需要开回自助注册时，启动加 `ALLOW_REGISTER=1`）
 - 保护措施：不能删除当前登录的账号；至少保留一个管理员（最后一个管理员不能降级或删除）；账号总数上限 50
 - 密码使用 scrypt + 随机盐哈希存储，不保存明文
 - 修改用户名、密码或角色后，该账号所有会话失效，需要重新登录
@@ -47,7 +48,7 @@ docker compose up -d            # 或：docker run -d --name ai-assistant -p 308
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/api/register` | 注册账号 |
+| POST | `/api/register` | 自助注册（**默认关闭**，返回 403 `REGISTER_DISABLED`；账号库为空时放行） |
 | POST | `/api/login` | 登录，返回会话 ID |
 | POST | `/api/logout` | 退出（支持 `?sid=` 供页面关闭时上报） |
 | POST | `/api/heartbeat` | 心跳，5 秒一次 |
@@ -62,9 +63,9 @@ docker compose up -d            # 或：docker run -d --name ai-assistant -p 308
 | PATCH | `/api/users/:name` | **编辑用户（仅管理员）**：`{username?, password?, role?}` |
 | DELETE | `/api/users/:name` | **删除用户（仅管理员）** |
 | GET | `/api/state` | 在线成员与游标 |
-| GET | `/api/config` `GET /api/health` | 配置 / 健康检查 |
+| GET | `/api/config` `GET /api/health` | 配置（含 `allowRegister`）/ 健康检查 |
 
-除登录、注册、健康检查外，均需请求头 `X-Session-Id`；SSE 因浏览器 `EventSource` 无法带自定义头，改用查询参数 `?sid=`。
+除登录、健康检查外，均需请求头 `X-Session-Id`；SSE 因浏览器 `EventSource` 无法带自定义头，改用查询参数 `?sid=`。
 
 响应按 `Accept-Encoding` 自动 gzip（JSON ≥512B、静态文件 ≥1KB），静态文件带 `ETag` 支持 304。
 

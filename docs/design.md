@@ -125,11 +125,11 @@ AI 助手
 
 ## 7. HTTP 接口
 
-统一 JSON，鉴权用请求头 `X-Session-Id`（登录/注册/健康检查除外）。
+统一 JSON，鉴权用请求头 `X-Session-Id`（登录/健康检查除外）。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/api/register` | 注册账号 |
+| POST | `/api/register` | 自助注册（默认关闭，返回 403 `REGISTER_DISABLED`） |
 | POST | `/api/login` | 登录，占一个在线位 |
 | POST | `/api/logout` | 释放会话（支持 `?sid=` 供 sendBeacon 使用） |
 | POST | `/api/heartbeat` | 心跳续期 |
@@ -138,6 +138,8 @@ AI 助手
 | GET | `/api/messages?afterId=N&limit=50` | 增量拉取 |
 | POST | `/api/messages` | 发消息 |
 | POST | `/api/account` | 改用户名 / 密码（需当前密码） |
+| GET/POST | `/api/users` | 用户列表 / 新增（仅管理员） |
+| PATCH/DELETE | `/api/users/:name` | 编辑 / 删除用户（仅管理员） |
 | GET | `/api/state` | 在线成员与游标 |
 | GET | `/api/config` `/api/health` | 配置 / 健康检查 |
 

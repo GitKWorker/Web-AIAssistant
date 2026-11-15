@@ -8,6 +8,8 @@ services:
     environment:
       PORT: "3080"
       NODE_OPTIONS: "--max-old-space-size=96"
+      # 自助注册默认关闭，账号由管理员创建；临时开回来改成 "1"
+      ALLOW_REGISTER: "0"
     volumes:
       - ai-assistant-data:/app/data
     # 单进程 Node，20 台设备轮询/SSE 上限，资源天花板给死，防止极端情况拖累宿主

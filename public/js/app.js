@@ -31,6 +31,7 @@
     sending: false,
     connected: true,
     authMode: 'login',
+    allowRegister: false,
     stream: null,
     sseOk: false,
     sseErrors: 0,
@@ -56,6 +57,7 @@
     el.authError = $('auth-error');
     el.authSubmit = $('auth-submit');
     el.deviceField = $('device-field');
+    el.loginFoot = $('login-foot');
     el.meAvatar = $('me-avatar');
     el.meName = $('me-name');
     el.meDevice = $('me-device');
@@ -219,6 +221,7 @@
   }
 
   function setAuthMode(mode) {
+    if (mode === 'register' && !state.allowRegister) mode = 'login';
     state.authMode = mode;
     var tabs = el.loginView.querySelectorAll('.tab');
     for (var i = 0; i < tabs.length; i += 1) {
@@ -238,6 +241,20 @@
         : '进入';
   }
 
+  // 服务端开关：自助注册关闭时，隐藏「创建账号」页签并强制停在登录态
+  function applyRegisterPolicy(allow) {
+    state.allowRegister = !!allow;
+    var tabs = el.loginView.querySelectorAll('.tab');
+    for (var i = 0; i < tabs.length; i += 1) {
+      if (tabs[i].dataset.mode === 'register') tabs[i].hidden = !state.allowRegister;
+    }
+    if (el.loginFoot && !state.allowRegister) {
+      el.loginFoot.textContent =
+        '最多 ' + state.maxOnline + ' 台设备同时在线 · 账号由管理员统一创建';
+    }
+    if (!state.allowRegister && state.authMode === 'register') setAuthMode('login');
+  }
+
   function handleAuthSubmit(event) {
     event.preventDefault();
     var username = el.authUsername.value.trim();
@@ -245,6 +262,11 @@
     var deviceName = el.authDevice.value.trim() || detectDeviceName();
 
     showAuthError('');
+    if (state.authMode === 'register' && !state.allowRegister) {
+      setAuthMode('login');
+      showAuthError('自助注册已关闭，请联系管理员开通账号');
+      return;
+    }
     if (!username || !password) {
       showAuthError('请填写用户名和密码');
       return;
@@ -1160,6 +1182,16 @@
     el.authDevice.value = localStorage.getItem(STORAGE.device) || detectDeviceName();
     setAuthMode('login');
     updateCounter();
+
+    // 拉一次服务端配置，决定是否显示「创建账号」页签（默认隐藏，取不到就当关闭）
+    api('GET', '/api/config')
+      .then(function (cfg) {
+        if (cfg && typeof cfg.maxOnline === 'number') state.maxOnline = cfg.maxOnline;
+        applyRegisterPolicy(cfg && cfg.allowRegister);
+      })
+      .catch(function () {
+        applyRegisterPolicy(false);
+      });
 
     var savedSession = localStorage.getItem(STORAGE.session);
     if (!savedSession) {
