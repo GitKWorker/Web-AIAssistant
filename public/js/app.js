@@ -31,6 +31,9 @@
     sending: false,
     connected: true,
     authMode: 'login',
+    stream: null,
+    sseOk: false,
+    sseErrors: 0,
     pollTimer: null,
     beatTimer: null,
   };
@@ -303,24 +306,124 @@
       });
   }
 
-  function startTimers() {
-    stopTimers();
+  /* ---------------- 实时通道：SSE 优先，失败回落轮询 ---------------- */
+
+  function parseEvent(event) {
+    try {
+      return JSON.parse(event.data);
+    } catch (err) {
+      return null;
+    }
+  }
+
+  function streamUrl() {
+    return '/api/stream?sid=' + encodeURIComponent(state.sessionId) + '&afterId=' + state.cursor;
+  }
+
+  function handleChunk(payload) {
+    if (!payload) return;
+    if (payload.reset) {
+      replaceMessages(payload.messages || []);
+    } else if (payload.messages && payload.messages.length) {
+      appendMessages(payload.messages);
+    }
+    if (typeof payload.cursor === 'number' && payload.cursor > state.cursor) {
+      state.cursor = payload.cursor;
+    }
+    if (typeof payload.online === 'number') updateOnline(payload.online);
+  }
+
+  function openStream() {
+    if (!state.sessionId) return;
+    if (!window.EventSource) {
+      startPolling();
+      return;
+    }
+
+    closeStream();
+    var es = new EventSource(streamUrl());
+    state.stream = es;
+
+    es.addEventListener('hello', function (event) {
+      state.sseOk = true;
+      state.sseErrors = 0;
+      stopPolling();
+      setConnected(true);
+      var data = parseEvent(event);
+      if (data && typeof data.online === 'number') updateOnline(data.online);
+    });
+
+    es.addEventListener('backlog', function (event) {
+      handleChunk(parseEvent(event));
+      setConnected(true);
+    });
+
+    es.addEventListener('message', function (event) {
+      var data = parseEvent(event);
+      if (!data) return;
+      if (data.message) appendMessages([data.message]);
+      if (typeof data.online === 'number') updateOnline(data.online);
+      setConnected(true);
+    });
+
+    es.addEventListener('online', function (event) {
+      var data = parseEvent(event);
+      if (data && typeof data.online === 'number') updateOnline(data.online);
+    });
+
+    es.onerror = function () {
+      state.sseOk = false;
+      setConnected(false);
+      startPolling();
+      state.sseErrors += 1;
+      if (state.sseErrors >= 3) verifySession();
+    };
+  }
+
+  function closeStream() {
+    if (state.stream) {
+      state.stream.close();
+      state.stream = null;
+    }
+    state.sseOk = false;
+  }
+
+  function verifySession() {
+    if (!state.sessionId) return;
+    state.sseErrors = 0;
+    api('GET', '/api/me').catch(function (err) {
+      if (err.status === 401) handleSessionExpired();
+    });
+  }
+
+  function startPolling() {
+    if (state.pollTimer || !state.sessionId) return;
     state.pollTimer = setInterval(function () {
       if (!document.hidden) poll();
     }, POLL_MS);
+  }
+
+  function stopPolling() {
+    if (state.pollTimer) clearInterval(state.pollTimer);
+    state.pollTimer = null;
+  }
+
+  function startTimers() {
+    stopTimers();
     state.beatTimer = setInterval(heartbeat, HEARTBEAT_MS);
-    if (state.pollTimer.unref) state.pollTimer.unref();
+    openStream();
   }
 
   function stopTimers() {
-    if (state.pollTimer) clearInterval(state.pollTimer);
+    stopPolling();
     if (state.beatTimer) clearInterval(state.beatTimer);
-    state.pollTimer = null;
     state.beatTimer = null;
+    closeStream();
   }
 
   function heartbeat() {
     if (!state.sessionId) return;
+    if (state.sseOk) return;
     api('POST', '/api/heartbeat')
       .then(function (data) {
         updateOnline(data.online);
@@ -775,7 +878,12 @@
     });
 
     document.addEventListener('visibilitychange', function () {
-      if (!document.hidden && state.sessionId) poll();
+      if (document.hidden || !state.sessionId) return;
+      if (!state.stream || state.stream.readyState === 2) {
+        state.sseErrors = 0;
+        openStream();
+      }
+      poll();
     });
 
     window.addEventListener('pagehide', function () {

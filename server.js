@@ -3,6 +3,7 @@
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
+const zlib = require('node:zlib');
 
 const { MessageStore } = require('./lib/store');
 const { SessionManager } = require('./lib/sessions');
@@ -23,11 +24,15 @@ const LIMITS = {
   rateWindowMs: 10000,
 };
 
+const GZIP_MIN = 512;
+const STREAM_PING_MS = 10000;
+const gzipCache = new Map();
+
 const DATA_DIR = path.join(__dirname, 'data');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
-const store = new MessageStore(path.join(DATA_DIR, 'messages.json'), LIMITS);
+const store = new MessageStore(path.join(DATA_DIR, 'messages.ndjson'), LIMITS);
 store.load();
 const accounts = new AccountStore(path.join(DATA_DIR, 'accounts.json'));
 const sessions = new SessionManager({ maxOnline: LIMITS.maxOnline, ttlMs: 15000 });
@@ -50,13 +55,107 @@ const MIME = {
 };
 
 function sendJson(res, status, payload) {
-  const body = Buffer.from(JSON.stringify(payload), 'utf8');
-  res.writeHead(status, {
+  let body = Buffer.from(JSON.stringify(payload), 'utf8');
+  const headers = {
     'Content-Type': 'application/json; charset=utf-8',
-    'Content-Length': body.length,
     'Cache-Control': 'no-store',
-  });
+  };
+  if (body.length >= GZIP_MIN && acceptsGzip(res.req)) {
+    body = zlib.gzipSync(body);
+    headers['Content-Encoding'] = 'gzip';
+    headers.Vary = 'Accept-Encoding';
+  }
+  headers['Content-Length'] = body.length;
+  res.writeHead(status, headers);
   res.end(body);
+}
+
+function acceptsGzip(req) {
+  return /\bgzip\b/i.test(String((req && req.headers['accept-encoding']) || ''));
+}
+
+const streamClients = new Set();
+
+function broadcast(event, data) {
+  if (!streamClients.size) return;
+  const chunk = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  for (const client of streamClients) {
+    try {
+      client.res.write(chunk);
+    } catch {
+      streamClients.delete(client);
+    }
+  }
+}
+
+function openStream(req, res, url) {
+  const raw = req.headers['x-session-id'] || url.searchParams.get('sid');
+  const session = raw ? sessions.touch(String(raw)) : null;
+  if (!session) {
+    return fail(res, 401, 'SESSION_EXPIRED', '登录已过期，请重新登录');
+  }
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  if (res.socket) {
+    res.socket.setNoDelay(true);
+    res.socket.setKeepAlive(true);
+    res.socket.setTimeout(0);
+  }
+  res.write('retry: 2000\n\n');
+
+  const afterId = Number(url.searchParams.get('afterId'));
+  if (url.searchParams.get('afterId') !== null && Number.isFinite(afterId)) {
+    const backlog = store.listAfter(afterId, LIMITS.maxFetch);
+    if (backlog.reset || backlog.messages.length) {
+      res.write(
+        `event: backlog\ndata: ${JSON.stringify({
+          messages: backlog.messages,
+          cursor: backlog.cursor,
+          reset: backlog.reset,
+        })}\n\n`,
+      );
+    }
+  }
+
+  const last = store.messages.length ? store.messages[store.messages.length - 1].id : 0;
+  res.write(
+    `event: hello\ndata: ${JSON.stringify({ online: sessions.count(), cursor: last, serverTime: Date.now() })}\n\n`,
+  );
+
+  const client = { res, sessionId: session.sessionId };
+  streamClients.add(client);
+
+  const ping = setInterval(() => {
+    sessions.touch(session.sessionId);
+    try {
+      res.write(': ping\n\n');
+    } catch {
+      cleanup();
+    }
+  }, STREAM_PING_MS);
+  if (ping.unref) ping.unref();
+
+  let closed = false;
+  function cleanup() {
+    if (closed) return;
+    closed = true;
+    clearInterval(ping);
+    streamClients.delete(client);
+    try {
+      res.end();
+    } catch {
+      /* ignore */
+    }
+  }
+  req.on('close', cleanup);
+  req.on('error', cleanup);
+  res.on('error', cleanup);
+  return undefined;
 }
 
 function fail(res, status, code, message) {
@@ -171,6 +270,7 @@ async function handleLogin(req, res) {
     return fail(res, 409, 'ROOM_FULL', `当前在线已满（${LIMITS.maxOnline}/${LIMITS.maxOnline}），请稍后再试`);
   }
   const session = sessions.create({ username: account.username, deviceName, ip: clientIp(req) });
+  broadcast('online', { online: sessions.count() });
   return sendJson(res, 200, {
     sessionId: session.sessionId,
     me: publicMe(session),
@@ -184,6 +284,7 @@ async function handleLogout(req, res, url) {
   const fromQuery = url ? url.searchParams.get('sid') : null;
   const sessionId = fromHeader || fromQuery;
   if (sessionId) sessions.destroy(String(sessionId));
+  broadcast('online', { online: sessions.count() });
   return sendJson(res, 200, { ok: true, online: sessions.count() });
 }
 
@@ -278,6 +379,8 @@ async function handleMessages(req, res, url, session) {
   });
   rememberClientMsg(clientMsgId, message);
 
+  broadcast('message', { message, online: sessions.count() });
+
   return sendJson(res, 200, { message, online: sessions.count() });
 }
 
@@ -296,8 +399,17 @@ async function handleApi(req, res, url) {
       return handleLogout(req, res, url);
     case 'GET /api/config':
       return sendJson(res, 200, LIMITS);
+    case 'GET /api/stream':
+      return openStream(req, res, url);
     case 'GET /api/health':
-      return sendJson(res, 200, { ok: true, online: sessions.count(), total: store.messages.length });
+      return sendJson(
+        res,
+        200,
+        Object.assign(
+          { ok: true, online: sessions.count(), stream: streamClients.size },
+          store.stats(),
+        ),
+      );
     default:
       break;
   }
@@ -356,16 +468,59 @@ function serveStatic(req, res, pathname) {
     return fail(res, 403, 'FORBIDDEN', '禁止访问');
   }
 
-  fs.readFile(target, (err, buffer) => {
-    if (err) {
+  fs.stat(target, (err, stat) => {
+    if (err || !stat.isFile()) {
       return fail(res, 404, 'NOT_FOUND', '页面不存在');
     }
+
     const ext = path.extname(target).toLowerCase();
-    res.writeHead(200, {
-      'Content-Type': MIME[ext] || 'application/octet-stream',
+    const type = MIME[ext] || 'application/octet-stream';
+    const etag = `W/"${stat.size.toString(16)}-${Math.floor(stat.mtimeMs).toString(16)}"`;
+    const headers = {
+      'Content-Type': type,
       'Cache-Control': 'no-cache',
-    });
-    res.end(buffer);
+      ETag: etag,
+      Vary: 'Accept-Encoding',
+    };
+
+    if (req.headers['if-none-match'] === etag) {
+      res.writeHead(304, headers).end();
+      return undefined;
+    }
+
+    const compressible = /^(text\/|application\/(javascript|json)|image\/svg)/.test(type);
+    const headOnly = req.method === 'HEAD';
+
+    if (compressible && stat.size > 1024 && acceptsGzip(req)) {
+      const cached = gzipCache.get(target);
+      if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+        headers['Content-Encoding'] = 'gzip';
+        headers['Content-Length'] = cached.body.length;
+        res.writeHead(200, headers);
+        return res.end(headOnly ? undefined : cached.body);
+      }
+      fs.readFile(target, (readErr, buffer) => {
+        if (readErr) return fail(res, 404, 'NOT_FOUND', '页面不存在');
+        const packed = zlib.gzipSync(buffer, { level: 9 });
+        gzipCache.set(target, { mtimeMs: stat.mtimeMs, size: stat.size, body: packed });
+        headers['Content-Encoding'] = 'gzip';
+        headers['Content-Length'] = packed.length;
+        res.writeHead(200, headers);
+        return res.end(headOnly ? undefined : packed);
+      });
+      return undefined;
+    }
+
+    headers['Content-Length'] = stat.size;
+    res.writeHead(200, headers);
+    if (headOnly) return res.end();
+    fs.createReadStream(target)
+      .on('error', () => {
+        if (!res.headersSent) fail(res, 500, 'INTERNAL', '服务器内部错误');
+        else res.end();
+      })
+      .pipe(res);
+    return undefined;
   });
 }
 
@@ -392,10 +547,14 @@ const server = http.createServer(async (req, res) => {
 const housekeeping = setInterval(() => {
   const { removed } = store.prune();
   if (removed > 0) {
+    store.maybeCompact();
     store.flush();
     console.log(`[store] 已清理 ${removed} 条过期消息，当前 ${store.messages.length} 条`);
   }
+  const before = sessions.count();
   sessions.sweep();
+  const after = sessions.count();
+  if (before !== after) broadcast('online', { online: after });
   const now = Date.now();
   for (const [key, hits] of rateMap) {
     if (!hits.some((t) => now - t < LIMITS.rateWindowMs)) rateMap.delete(key);
@@ -406,11 +565,20 @@ if (housekeeping.unref) housekeeping.unref();
 server.listen(PORT, HOST, () => {
   console.log(`AI 助手已启动：http://localhost:${PORT}`);
   console.log(`局域网访问：http://<本机IP>:${PORT}`);
-  console.log(`保留策略：${LIMITS.retainDays} 天 / ${LIMITS.maxMessages} 条 · 在线上限 ${LIMITS.maxOnline} 台设备 · 轮询 3 秒`);
+  console.log(`保留策略：${LIMITS.retainDays} 天 / ${LIMITS.maxMessages} 条 · 在线上限 ${LIMITS.maxOnline} 台设备 · SSE 推送（轮询兵底）`);
+  console.log(`存储：NDJSON 追加写 · 当前 ${store.messages.length} 条`);
 });
 
 function shutdown() {
   try {
+    for (const client of streamClients) {
+      try {
+        client.res.end();
+      } catch {
+        /* ignore */
+      }
+    }
+    streamClients.clear();
     store.flush();
   } catch {
     /* ignore */

@@ -1,6 +1,6 @@
 # AI 助手
 
-轻量团队消息同步工具。单进程 Node 服务，纯 HTTP 轮询（3 秒），零第三方依赖。
+轻量团队消息同步工具。单进程 Node 服务，SSE 实时推送（不支持时自动回落 3 秒轮询），零第三方依赖。
 
 ## 启动
 
@@ -14,9 +14,18 @@ PORT=8080 npm start # 换端口
 
 首次启动会自动创建账号 **admin / admin123**，登录后请到「系统设置 → 账号」改掉。
 
+### Docker 部署（极简 Alpine 镜像）
+
+```bash
+docker build -t ai-assistant:1.0.0 .
+docker compose up -d            # 或：docker run -d --name ai-assistant -p 3000:3000 -v ai-assistant-data:/app/data ai-assistant:1.0.0
+```
+
+镜像基于 `alpine:3.24`，只从官方 node 镜像中拷入 strip 过的 `node` 二进制与 `libstdc++`，**不含 npm / npx / tzdata / curl**，运行阶段不执行任何 `apk`；以 UID 10001 非 root 运行，数据落在命名卷 `ai-assistant-data`。
+
 ## 功能
 
-- **消息同步**：同一界面发送，所有在线设备 3 秒内看到新消息
+- **消息同步**：同一界面发送，所有在线设备实时看到新消息（SSE 推送，秒级；连接不通时自动回落 3 秒轮询，断线重连按游标补齐不丢消息）
 - **身份**：登录用户名 + 设备名，例如 `张明 · Windows-PC`；同一账号多设备可同时在线，各占一个在线位
 - **在线上限**：20 台设备，满载时新登录提示「当前在线已满」，关页面 / 断线 15 秒内自动释放
 - **消息量**：首屏只拉最近 3 条，界面最多保留 50 条（可在设置改为 20 / 100）
@@ -40,18 +49,22 @@ PORT=8080 npm start # 换端口
 | POST | `/api/heartbeat` | 心跳，5 秒一次 |
 | GET | `/api/me` | 校验会话、取当前身份 |
 | GET | `/api/messages?limit=3` | 首屏最近 N 条 |
-| GET | `/api/messages?afterId=N&limit=50` | 增量拉取 |
+| GET | `/api/messages?afterId=N&limit=50` | 增量拉取（SSE 不可用时的兜底） |
+| GET | `/api/stream?sid=…&afterId=N` | **SSE 实时通道**，事件：`hello` / `backlog` / `message` / `online` |
 | POST | `/api/messages` | 发送消息 |
 | POST | `/api/account` | 修改用户名 / 密码 |
 | GET | `/api/state` | 在线成员与游标 |
 | GET | `/api/config` `GET /api/health` | 配置 / 健康检查 |
 
-除登录、注册、健康检查外，均需请求头 `X-Session-Id`。
+除登录、注册、健康检查外，均需请求头 `X-Session-Id`；SSE 因浏览器 `EventSource` 无法带自定义头，改用查询参数 `?sid=`。
+
+响应按 `Accept-Encoding` 自动 gzip（JSON ≥512B、静态文件 ≥1KB），静态文件带 `ETag` 支持 304。
 
 ## 数据
 
-- `data/messages.json`：消息（含 `nextId` 游标），原子写入，200ms 合并落盘
+- `data/messages.ndjson`：消息，**一行一条 NDJSON 追加写**（不再整文件重写），崩溃残留的半行在启动时自动跳过；累计冗余超过 `max(200, 条数×25%)` 时原子重写压缩一次（tmp + rename）
 - `data/accounts.json`：账号（scrypt 哈希）
+- `data/messages.json`：旧版全量 JSON，存在时启动自动迁移为 NDJSON 并重命名为 `.bak`
 
 删掉 `data/` 目录即可重置全部数据（重启后会重新生成 admin/admin123）。
 

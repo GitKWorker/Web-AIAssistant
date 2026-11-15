@@ -1,0 +1,37 @@
+services:
+  ai-assistant:
+    image: ai-assistant:1.0.0
+    container_name: ai-assistant
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: "3000"
+      NODE_OPTIONS: "--max-old-space-size=96"
+    volumes:
+      - ai-assistant-data:/app/data
+    # 单进程 Node，20 台设备轮询/SSE 上限，资源天花板给死，防止极端情况拖累宿主
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 128M
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/api/health').then(function(r){process.exit(r.ok?0:1)}).catch(function(){process.exit(1)})"
+      interval: 30s
+      timeout: 5s
+      start_period: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+volumes:
+  ai-assistant-data:
+    name: ai-assistant-data
