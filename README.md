@@ -6,11 +6,11 @@
 
 ```bash
 cd ai-assistant
-npm start          # 默认 http://localhost:3000
+npm start          # 默认 http://localhost:3080
 PORT=8080 npm start # 换端口
 ```
 
-局域网访问：`http://<本机IP>:3000`。HTTPS 请自行在反向代理层（Nginx / Caddy）配置，程序本身只监听 HTTP。
+局域网访问：`http://<本机IP>:3080`。HTTPS 请自行在反向代理层（Nginx / Caddy）配置，程序本身只监听 HTTP。
 
 首次启动会自动创建账号 **admin / admin123**，登录后请到「系统设置 → 账号」改掉。
 
@@ -18,7 +18,7 @@ PORT=8080 npm start # 换端口
 
 ```bash
 docker build -t ai-assistant:1.0.0 .
-docker compose up -d            # 或：docker run -d --name ai-assistant -p 3000:3000 -v ai-assistant-data:/app/data ai-assistant:1.0.0
+docker compose up -d            # 或：docker run -d --name ai-assistant -p 3080:3080 -v ai-assistant-data:/app/data ai-assistant:1.0.0
 ```
 
 镜像基于 `alpine:3.24`，只从官方 node 镜像中拷入 strip 过的 `node` 二进制与 `libstdc++`，**不含 npm / npx / tzdata / curl**，运行阶段不执行任何 `apk`；以 UID 10001 非 root 运行，数据落在命名卷 `ai-assistant-data`。

@@ -38,7 +38,7 @@ RUN addgroup -g 10001 app \
  && adduser -D -u 10001 -G app -h /app -s /sbin/nologin app
 
 ENV NODE_ENV=production \
-    PORT=3000
+    PORT=3080
 
 WORKDIR /app
 
@@ -50,10 +50,10 @@ RUN mkdir -p /app/data && chown 10001:10001 /app/data \
  && node -v && echo '[build] node 可在运行镜像内启动'
 
 USER 10001:10001
-EXPOSE 3000
+EXPOSE 3080
 VOLUME ["/app/data"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/api/health').then(function(r){process.exit(r.ok?0:1)}).catch(function(){process.exit(1)})"
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3080)+'/api/health').then(function(r){process.exit(r.ok?0:1)}).catch(function(){process.exit(1)})"
 
 CMD ["node", "server.js"]

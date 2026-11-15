@@ -4,9 +4,9 @@ services:
     container_name: ai-assistant
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "3080:3080"
     environment:
-      PORT: "3000"
+      PORT: "3080"
       NODE_OPTIONS: "--max-old-space-size=96"
     volumes:
       - ai-assistant-data:/app/data
@@ -21,7 +21,7 @@ services:
         - CMD
         - node
         - -e
-        - "fetch('http://127.0.0.1:3000/api/health').then(function(r){process.exit(r.ok?0:1)}).catch(function(){process.exit(1)})"
+        - "fetch('http://127.0.0.1:3080/api/health').then(function(r){process.exit(r.ok?0:1)}).catch(function(){process.exit(1)})"
       interval: 30s
       timeout: 5s
       start_period: 5s
