@@ -1493,8 +1493,9 @@
     el.usageCard.hidden = false;
     el.usageUsed.textContent = fmtSize(usage.bytes);
     if (usage.quotaBytes) {
-      // R2：固定免费额度 + 百分比进度条
-      el.usageQuota.textContent = '/ ' + fmtSize(usage.quotaBytes) + ' 免费额度';
+      // R2 免费 10GB / Tigris 免费 5GB：统一固定免费额度 + 百分比进度条
+      el.usageQuota.textContent =
+        '/ ' + fmtSize(usage.quotaBytes) + ' 免费额度' + (state.fileStore === 'keep' ? ' · 永久保存' : '');
       el.usagePct.textContent = usage.percent + '%';
       var width = Math.max(0, Math.min(100, Number(usage.percent) || 0));
       el.usageFill.style.width = (width > 0 && width < 1 ? 1 : width) + '%';

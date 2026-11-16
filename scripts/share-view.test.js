@@ -89,14 +89,14 @@ function makeFetch(log, role) {
       data = { ok: true, key: 's/a1/照片.png', name: '照片.png' };
     } else if (u.split('?')[0] === '/api/files') {
       if (u.indexOf('store=keep') >= 0) {
-        // 永久存储（Tigris）：无配额、不过期
+        // 永久存储（Tigris）：5GB 免费额度、不过期
         data = {
           store: 'keep',
           usage: {
             count: 1,
             bytes: 5242880,
-            quotaBytes: null,
-            percent: null,
+            quotaBytes: 5368709120,
+            percent: 0.1,
             byScene: {
               chat: { count: 0, bytes: 0 },
               share: { count: 0, bytes: 0 },
@@ -434,8 +434,10 @@ function dropFile(win, doc, name, type, size) {
   ok('切换后列表为永久存储内容', E.doc.getElementById('cf-list').textContent.indexOf('备份.zip') >= 0);
   ok('永久文件不过期', E.doc.getElementById('cf-list').textContent.indexOf('永久保存') >= 0);
   ok(
-    '用量卡片按无配额展示',
-    E.doc.getElementById('usage-quota').textContent.indexOf('永久保存') >= 0,
+    '用量卡片展示 5GB 免费额度与永久保存标注',
+    E.doc.getElementById('usage-quota').textContent.indexOf('5.00 GB') >= 0 &&
+      E.doc.getElementById('usage-quota').textContent.indexOf('永久保存') >= 0 &&
+      E.doc.getElementById('usage-pct').textContent === '0.1%',
     E.doc.getElementById('usage-quota').textContent,
   );
   E.doc.getElementById('cf-tab-tmp').click();

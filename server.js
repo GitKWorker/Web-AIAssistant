@@ -583,7 +583,7 @@ let fileListCache = { tmp: { at: 0, data: null }, keep: { at: 0, data: null } };
 
 function summarizeUsage(objects, store) {
   const isKeep = store === 'keep';
-  const quotaBytes = isKeep ? null : r2.FREE_QUOTA_BYTES; // Tigris 无固定免费配额，只展示已用
+  const quotaBytes = isKeep ? r2.KEEP_QUOTA_BYTES : r2.FREE_QUOTA_BYTES; // R2 免费 10GB / Tigris 免费 5GB
   const bytes = objects.reduce((sum, o) => sum + (Number(o.size) || 0), 0);
   const byScene = {
     chat: { count: 0, bytes: 0 },
