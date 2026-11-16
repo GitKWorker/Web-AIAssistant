@@ -74,14 +74,21 @@ function makeFetch(log, role) {
     } else if (u.indexOf('/api/messages?') === 0) {
       data = { messages: [], cursor: 0, online: 1 };
     } else if (u.indexOf('/api/files/sign') === 0) {
+      // 回显请求的 scene，便于断言上传去向（keep 走 Tigris k/ 前缀，chat/share 走 R2）
+      const reqBody = JSON.parse((opts && opts.body) || '{}');
+      const scene = reqBody.scene === 'keep' ? 'keep' : reqBody.scene === 'chat' ? 'chat' : 'share';
+      (log.signScenes = log.signScenes || []).push(scene);
+      const prefix = scene === 'keep' ? 'k' : scene === 'chat' ? 'c' : 's';
       data = {
-        uploadUrl: 'https://r2.example/put',
+        uploadUrl: 'https://store.example/put/' + prefix,
         contentType: 'application/pdf',
-        key: 's/abc123/x.pdf',
-        name: '报表.pdf',
-        publicUrl: PUBLIC_URL,
-        expireAt: Date.now() + 7 * 86400000,
+        key: prefix + '/abc123/x.pdf',
+        name: reqBody.name || '报表.pdf',
+        publicUrl: scene === 'keep' ? 'https://files.frkang.top/k/abc123/x.pdf' : PUBLIC_URL,
+        expireAt: scene === 'keep' ? 0 : Date.now() + 7 * 86400000,
+        store: scene === 'keep' ? 'keep' : 'tmp',
       };
+      (log.signKeys = log.signKeys || []).push(data.key);
     } else if (u.indexOf('/api/files/download') === 0) {
       data = { url: 'https://r2.example/signed-get?x=1', name: '照片.png', size: 2097152, expiresIn: 300 };
     } else if (u.split('?')[0] === '/api/files' && method === 'DELETE') {
@@ -440,6 +447,25 @@ function dropFile(win, doc, name, type, size) {
       E.doc.getElementById('usage-pct').textContent === '0.1%',
     E.doc.getElementById('usage-quota').textContent,
   );
+  // 永久页签上传必须落到 Tigris：请求 scene=keep、key 用 k/ 前缀、结果标「永久保存」
+  const keepFile = new E.win.File(['x'], '备份2.zip', { type: 'application/zip' });
+  const dropEv = new E.win.Event('drop', { bubbles: true, cancelable: true });
+  dropEv.dataTransfer = { files: [keepFile] };
+  E.doc.getElementById('share-drop').dispatchEvent(dropEv);
+  await sleep(150);
+  const scenes = E.calls.signScenes || [];
+  ok('永久页签上传请求 scene=keep', scenes[scenes.length - 1] === 'keep', String(scenes));
+  const keys = E.calls.signKeys || [];
+  ok('永久页签上传对象 key 用 k/ 前缀', String(keys[keys.length - 1]).indexOf('k/') === 0, String(keys));
+  const upXhr = FakeXHR.instances[FakeXHR.instances.length - 1];
+  upXhr.finish(200);
+  await sleep(150);
+  ok(
+    '永久页签上传结果标注永久保存',
+    E.doc.getElementById('sr-sub').textContent.indexOf('永久保存') >= 0,
+    E.doc.getElementById('sr-sub').textContent,
+  );
+
   E.doc.getElementById('cf-tab-tmp').click();
   await sleep(120);
   // 场景 8 已删除「照片.png」，临时列表应只剩「说明.pdf」

@@ -1384,7 +1384,7 @@
     el.spPct.textContent = '0%';
 
     var startedAt = 0;
-    uploadToR2(file, 'share', function (ratio) {
+    uploadToR2(file, scene, function (ratio) {
       var p = Math.max(0, Math.min(1, ratio || 0));
       el.spFill.style.width = (p * 100).toFixed(1) + '%';
       el.spPct.textContent = Math.round(p * 100) + '%';
@@ -2228,13 +2228,20 @@
     });
 
     el.spCancel.addEventListener('click', function () {
-      if (state.uploadXhrs.share) {
+      // 上传按场景登记：临时页签是 share，永久页签是 keep，两处都要能取消
+      ['share', 'keep'].forEach(function (scene) {
+        var xhr = state.uploadXhrs[scene];
+        if (!xhr) return;
         try {
-          state.uploadXhrs.share.abort();
+          xhr.abort();
         } catch (err) {
           /* 忽略 */
         }
-      }
+        state.uploadXhrs[scene] = null;
+      });
+      el.shareProgress.hidden = true;
+      el.shareDrop.hidden = false;
+      syncShareHint();
     });
 
     el.shareHistoryList.addEventListener('click', function (event) {
