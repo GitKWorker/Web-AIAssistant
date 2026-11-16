@@ -447,6 +447,28 @@ function dropFile(win, doc, name, type, size) {
       E.doc.getElementById('cf-list').textContent.indexOf('备份.zip') < 0,
   );
 
+  /* ---------- 场景 11：最近分享按页签过滤 + 下载按钮走强制下载 ---------- */
+  console.log('\n[11] 历史按页签过滤 / 下载按钮');
+  const seed = JSON.stringify([
+    { key: 's/a1/临时文件.zip', name: '临时文件.zip', size: 100, url: 'https://files.frkang.top/s/a1/%E4%B8%B4%E6%97%B6%E6%96%87%E4%BB%B6.zip', expireAt: Date.now() + 86400000, store: 'tmp' },
+    { key: 'k/k1/永久文件.zip', name: '永久文件.zip', size: 100, url: '', expireAt: 0, store: 'keep' },
+  ]);
+  const H = await boot(seed);
+  nav(H.doc, 'files');
+  await sleep(80);
+  ok('临时页签只显示临时分享', H.doc.querySelectorAll('#sh-list .sh-row').length === 1 &&
+    H.doc.getElementById('sh-list').textContent.indexOf('临时文件.zip') >= 0);
+  const dl = H.doc.querySelector('#sh-list .sh-row a');
+  ok('历史下载按钮走强制下载入口', dl && dl.textContent === '下载' &&
+    dl.href.indexOf('/api/files/scan?key=') > 0, dl && dl.href);
+  H.doc.getElementById('cf-tab-keep').click();
+  await sleep(120);
+  ok('永久页签只显示永久分享', H.doc.querySelectorAll('#sh-list .sh-row').length === 1 &&
+    H.doc.getElementById('sh-list').textContent.indexOf('永久文件.zip') >= 0);
+  H.doc.getElementById('cf-tab-tmp').click();
+  await sleep(80);
+  ok('切回临时页签历史恢复', H.doc.getElementById('sh-list').textContent.indexOf('临时文件.zip') >= 0);
+
   /* ---------- 汇总 ---------- */
   console.log('\n----------------------------------------');
   console.log('通过 ' + pass + ' 项，失败 ' + fail + ' 项');

@@ -1201,13 +1201,14 @@
       syncShareHint();
     }
     renderShareHistory();
-    // 距离上次读取超过 15 秒就强制刷新，避免刚在聊天里发完附件这里看不到
+    // 缓存优先：服务端有 15 秒列表缓存，只有超过 60 秒才强刷，避免每次进页都等 R2 慢请求
     if (syncCloudVisibility()) {
-      loadCloudFiles(!state.filesAt || Date.now() - state.filesAt > 15000);
+      loadCloudFiles(Date.now() - state.filesAt > 60000);
     }
   }
 
-  // 切换临时/永久存储页签：清空当前列表状态，再按新存储重新拉取
+  // 切换临时/永久存储页签：作废在途请求，清空当前列表状态，再按新存储重新拉取；
+  // 上传区与最近分享同步跟随页签，保证整页都是当前存储的内容
   function switchStore(store) {
     if (store !== 'keep' && store !== 'tmp') store = 'tmp';
     if (state.fileStore === store) return;
@@ -1217,8 +1218,14 @@
     state.files = [];
     state.filesUsage = null;
     state.filesAt = 0;
+    state.filesReqId = (state.filesReqId || 0) + 1;
     renderUsage(null);
     renderCloudFiles();
+    // 上一条分享结果属于另一个存储时，重置为拖拽区，避免误导
+    if (state.lastShare && (state.lastShare.store || 'tmp') !== store) {
+      resetShare();
+    }
+    renderShareHistory();
     syncShareHint();
     loadCloudFiles(true);
   }
@@ -1290,7 +1297,11 @@
 
   function renderShareHistory() {
     if (!el.shareHistoryList) return;
-    var items = state.shareHistory || [];
+    // 只显示当前页签对应的存储：临时页签看临时分享，永久页签看永久分享
+    var cur = state.fileStore === 'keep' && state.keepUpload ? 'keep' : 'tmp';
+    var items = (state.shareHistory || []).filter(function (it) {
+      return (it.store || (Number(it.expireAt) > 0 ? 'tmp' : 'keep')) === cur;
+    });
     el.shareHistoryList.textContent = '';
     el.shareHistory.hidden = !items.length;
 
@@ -1333,10 +1344,11 @@
 
         var open = document.createElement('a');
         open.className = 'btn-ghost btn-sm';
-        open.href = item.url;
+        // 走免登录扫码入口强制 attachment 下载原名；老记录没有 key 才退回直链
+        open.href = item.key ? scanDownloadUrl(item.key) : item.url;
         open.target = '_blank';
         open.rel = 'noopener';
-        open.textContent = '打开';
+        open.textContent = '下载';
         btns.appendChild(open);
       }
 
@@ -1402,6 +1414,12 @@
       });
   }
 
+  // 免登录下载入口：302 到带 attachment 的签名链接，任何文件都直接另存原名，
+  // 而公开域直链会把图片/PDF 在浏览器内打开而不是下载
+  function scanDownloadUrl(key) {
+    return window.location.origin + '/api/files/scan?key=' + encodeURIComponent(key);
+  }
+
   function renderShareResult(meta) {
     if (meta) state.lastShare = meta;
     el.shareProgress.hidden = true;
@@ -1416,7 +1434,8 @@
       ' · ' +
       (Number(meta.expireAt) > 0 ? expireText(meta.expireAt) + ' · 保存 ' + state.retainFileDays + ' 天' : '永久保存 · Tigris');
     el.srUrl.value = meta.url;
-    el.srOpen.href = meta.url;
+    el.srOpen.href = meta.key ? scanDownloadUrl(meta.key) : meta.url;
+    el.srOpen.textContent = '下载文件';
     el.srCopy.dataset.url = meta.url;
     renderQr(meta.url);
   }
@@ -1617,18 +1636,25 @@
   }
 
   function loadCloudFiles(force) {
-    if (!state.fileUpload || state.filesLoading) return;
+    if (!state.fileUpload) return;
     // 普通成员没有权限：直接不发请求，省得每次都吃一个 403
     if (!canSeeCloudFiles()) {
       syncCloudVisibility();
       return;
     }
     var store = state.fileStore === 'keep' && state.keepUpload ? 'keep' : 'tmp';
+    // 请求序号：切页签/再次刷新后，慢的在途响应直接作废，
+    // 防止 A 存储的数据被渲染到 B 页签下（列表跨页签串数据的竞态）
+    state.filesReqId = (state.filesReqId || 0) + 1;
+    var reqId = state.filesReqId;
     state.filesLoading = true;
     el.filesRefresh.disabled = true;
+    el.cloudSub.textContent = '加载中…';
+    el.cloudEmpty.hidden = true;
 
     api('GET', '/api/files?store=' + store + (force ? '&refresh=1' : '')).then(
       function (data) {
+        if (reqId !== state.filesReqId) return;
         state.filesLoading = false;
         el.filesRefresh.disabled = false;
         state.filesAt = Date.now();
@@ -1638,6 +1664,7 @@
         renderCloudFiles();
       },
       function (err) {
+        if (reqId !== state.filesReqId) return;
         state.filesLoading = false;
         el.filesRefresh.disabled = false;
         if (err && err.status === 401) return;
