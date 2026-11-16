@@ -180,11 +180,18 @@
 
         <div class="cloud-files" id="cloud-files" hidden>
           <div class="cf-head">
-            <span class="cf-title">云端文件</span>
+            <div class="cf-tabs" id="cf-tabs">
+              <button type="button" class="cf-tab is-active" data-store="tmp" id="cf-tab-tmp">
+                临时存储<span class="cf-tab-sub">7 天清理</span>
+              </button>
+              <button type="button" class="cf-tab" data-store="keep" id="cf-tab-keep" hidden>
+                永久存储<span class="cf-tab-sub">Tigris</span>
+              </button>
+            </div>
             <span class="cf-sub" id="cf-sub"></span>
           </div>
           <div class="cf-list" id="cf-list"></div>
-          <div class="cf-empty" id="cf-empty" hidden>桶里还没有文件</div>
+          <div class="cf-empty" id="cf-empty" hidden>还没有文件</div>
         </div>
       </div>
     </section>

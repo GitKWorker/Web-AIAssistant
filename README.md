@@ -14,6 +14,7 @@
 | Docker 跑起来 | `-p 3080:3080`（端口映射，不是环境变量） | 宿主机访问不到 |
 | **用文件上传 / 发文件页** | `R2_ACCOUNT_ID`、`R2_ACCESS_KEY`、`R2_SECRET_KEY`、`R2_BUCKET`、`R2_PUBLIC_BASE` **五个全部填** | 缺任意一个 → `fileUpload` 为 `false`，上传入口**在界面上整体消失**（不报错、不留提示） |
 | 允许用户自己注册 | `ALLOW_REGISTER=1` | 默认关闭，登录页只有「登录」无「注册」 |
+| **启用永久存储页签（可选）** | `TIGRIS_ACCESS_KEY`、`TIGRIS_SECRET_KEY`、`TIGRIS_BUCKET` | 不配则文件页只有「临时存储」页签，消息功能不受影响 |
 | 换端口 | `PORT`（默认 3080） | — |
 | 限制单文件大小 | `R2_MAX_SIZE_MB`（默认 100） | — |
 | 内存很小的机器 | `NODE_OPTIONS=--max-old-space-size=96`（建议值） | 不配也能跑，配了更稳 |
@@ -38,6 +39,11 @@
 | `R2_BUCKET` | **是（用时）** | — | 桶名，如 `aia-files` |
 | `R2_PUBLIC_BASE` | **是（用时）** | — | 桶的自定义域，如 `https://files.frkang.top`，不带结尾斜杠 |
 | `R2_MAX_SIZE_MB` | 否 | `100` | 单文件上限，超出返回 413 |
+| `TIGRIS_S3_ENDPOINT` | 否 | `https://fly.storage.tigris.dev` | 永久存储的 S3 兼容端点 |
+| `TIGRIS_ACCESS_KEY` | **是（用时）** | — | Tigris Access Key（`tid_` 开头） |
+| `TIGRIS_SECRET_KEY` | **是（用时）** | — | Tigris Secret（`tsec_` 开头） |
+| `TIGRIS_BUCKET` | **是（用时）** | — | 永久存储桶名，如 `aia-keep` |
+| `TIGRIS_MAX_SIZE_MB` | 否 | `100` | 永久存储单文件上限 |
 
 「用时」＝只有你要用文件上传功能才需要；不配则消息功能完全不受影响。
 
@@ -208,8 +214,9 @@ curl http://<host>:3080/api/config
 - **复制**：每条消息右侧有复制按钮，点击复制整条消息内容
 - **系统设置**：改用户名 / 密码（需验证当前密码）、消息显示条数、设备名、清空本地偏好、退出登录
 - **用户管理**（仅管理员）：增加、编辑、删除账号，可设管理员 / 普通成员，列表显示角色与在线状态；删除或改密后该用户在线会话立即失效
-- **文件直传**：聊天框左侧回形针发送附件，侧栏「文件」页生成临时链接与二维码。文件字节由浏览器直传 Cloudflare R2，**不经本服务转发、不占服务器磁盘与带宽**，服务端只签发一次性上传许可并记录元数据
-- **云端文件（仅管理员）**：「文件」页列出桶内全部对象，显示已用空间 / 10 GB 免费额度与分类明细；图片、PDF、音视频、纯文本可直接在页面内预览，任意文件都能一键下载（保留原文件名），每行还可单独删除或生成扫码下载二维码。普通成员只能上传分享，看不到也无法调用这份列表
+- **文件直传**：聊天框左侧回形针发送附件（**始终走 R2 临时存储**），侧栏「文件」页生成临时链接与二维码。文件字节由浏览器直传对象存储，**不经本服务转发、不占服务器磁盘与带宽**，服务端只签发一次性上传许可并记录元数据
+- **双存储页签（仅管理员）**：「文件」页的云端列表分两个页签——**临时存储**（R2，保留 7 天自动清理）与**永久存储**（Tigris，无生命周期永不清理）；两个页签功能一致：预览、下载、复制链接、扫码、删除。上传区的去向跟随当前页签
+- **云端文件**：显示已用空间与分类明细（R2 侧带 10 GB 免费额度进度条，Tigris 侧无固定配额只显示已用与对象数）；图片、PDF、音视频、纯文本可直接在页面内预览，任意文件都能一键下载（保留原文件名）
 - **分享记录不丢**：发文件页生成的链接、二维码常驻，切到其他页面再回来、刷新浏览器都还在；最近 10 条记录保存在浏览器本地（localStorage），过期条目自动标灰并只保留「移除」
 
 ---
@@ -257,31 +264,39 @@ R2_MAX_SIZE_MB=100          # 可选，默认 100
   ├────────────────────────>│  只存元数据，不碰文件    │
 ```
 
-- 对象键 `c/<32位随机hex>/<文件名>`（聊天附件）或 `s/…`（独立分享），文件名进 URL 使浏览器下载时自动使用真实文件名
+- 对象键：R2 侧 `c/<32位随机hex>/<文件名>`（聊天附件）或 `s/…`（独立分享）；Tigris 侧 `k/…`（永久保存）。文件名进 URL 使浏览器下载时自动使用真实文件名
 - **安全**：`text/html`、`image/svg+xml` 等可执行类型一律降级为 `application/octet-stream`，避免在文件域下执行脚本；服务端校验回传的 URL 必须落在 `R2_PUBLIC_BASE` 上，防止伪造外链
 - 上传用 XHR 而非 fetch —— 只有 XHR 能读取上传进度
 - 文件默认保留 7 天，过期后消息里的卡片变灰显示「已过期清理」
 - 上传中的 XHR 按场景（`chat` / `share`）分开登记，切换页面或取消一处上传不会误伤另一处
 - 发文件页的结果卡片由 `state.lastShare` 驱动，进入页面只做恢复、不做清空；只有点「再传一个」才清当前结果，历史记录不动
 
-### 云端文件与空间用量
+### 云端文件与空间用量（双存储页签）
 
-「文件」页下方是桶内真实对象列表，**仅管理员可见**（服务端对所有相关接口做角色校验，普通成员不仅界面隐藏，连请求都不会发出）。数据来自服务端 `GET /api/files`（S3 `ListObjectsV2`，纯 `node:crypto` 签名，零依赖）：
+「文件」页下方是桶内真实对象列表，**仅管理员可见**（服务端对所有相关接口做角色校验，普通成员不仅界面隐藏，连请求都不会发出）。顶部两个页签切换存储：
 
-- 顶部卡片显示已用空间、10 GB 免费额度占比、聊天附件 / 分享的分类计数；超过 80% 进度条转红
+| 页签 | 后端 | 生命周期 | 上传去向 |
+|---|---|---|---|
+| 临时存储 | Cloudflare R2（桶 `R2_BUCKET`） | 7 天自动清理 | 上传区默认去向 |
+| 永久存储 | Tigris（桶 `TIGRIS_BUCKET`，S3 兼容端点 `TIGRIS_S3_ENDPOINT`） | 无，永不清理 | 页签切换后上传区自动跟随 |
+
+数据来自服务端 `GET /api/files?store=tmp\|keep`（S3 `ListObjectsV2`，纯 `node:crypto` 签名，零依赖）：
+
+- 顶部卡片显示已用空间与分类计数；R2 侧另有 10 GB 免费额度进度条（超 80% 转红），Tigris 侧无固定配额只显示已用与对象数
 - 列表按创建时间倒序，最多渲染最近 100 条；每行给出查看、下载、复制链接、扫码、删除
-- **查看**：图片走页面内预览层，PDF / 视频 / 音频 / 纯文本用 `iframe` 或原生播放器；类型按扩展名判断，其余只提供下载
-- **下载**：前端先向 `GET /api/files/download?key=…` 换取 5 分钟有效的签名链接，再由浏览器直连 R2 取字节——**文件依旧不经过本服务**。签名里带 `response-content-disposition`，图片和 PDF 也会直接另存为原文件名，而不是在新标签里打开
-- **扫码**：每行右侧二维码图标生成 `GET /api/files/scan?key=…` 的二维码。这条入口免登录（手机扫码没有会话），访问时服务端现签 5 分钟下载链接再 302 跳转，因此**二维码本身长期有效**，且强制走 `attachment`，扫码即下载原名文件。保密性来自 key 里的 32 位随机 hex，与公开域直链同等强度
+- **查看**：图片走页面内预览层，PDF / 视频 / 音频 / 纯文本用 `iframe` 或原生播放器；类型按扩展名判断，其余只提供下载。R2 用公开域直链，Tigris 无公开域改发 1 小时有效的 inline 签名链接
+- **下载**：前端先向 `GET /api/files/download?key=…` 换取 5 分钟有效的签名链接，再由浏览器直连对象存储取字节——**文件依旧不经过本服务**。签名里带 `response-content-disposition`，图片和 PDF 也会直接另存为原文件名，而不是在新标签里打开
+- **扫码**：每行右侧二维码图标生成 `GET /api/files/scan?key=…` 的二维码。这条入口免登录（手机扫码没有会话），访问时服务端现签 5 分钟下载链接再 302 跳转，因此**二维码本身长期有效**，且强制走 `attachment`，扫码即下载原名文件。保密性来自 key 里的 32 位随机 hex，与公开域直链同等强度；key 首段（`c/`、`s/`、`k/`）决定路由到哪个桶
 - **删除**：每行右侧垃圾桶按钮，二次确认后调 `DELETE /api/files?key=…`，服务端用 SigV4 DELETE 真删对象，删完缓存立即失效、列表与用量同步刷新；删除不可恢复
-- 列表与用量有 15 秒服务端缓存（翻页属于 Class A 操作）；签发新上传许可时缓存立即失效，上传完成后前端会主动强刷一次
+- 永久存储的分享链接也指向扫码入口（Tigris 无公开域，服务端会根据请求 Host 生成），同样长期有效
+- 列表与用量有 15 秒服务端缓存（两个存储各自独立）；签发新上传许可时缓存立即失效，上传完成后前端会主动强刷一次
 
 ### 自检
 
 ```bash
 node scripts/r2-smoke.js     # 签名 / 上传 / 公开读取 三项连通性
 node scripts/upload-flow.js  # 需先 npm start：登录 → 签名 → 上传 → 发消息 → 拉回核对
-npm run test:share           # 需先 npm i -D jsdom：发文件页、云端列表、权限/扫码/删除的 DOM 级回归测试（54 项）
+npm run test:share           # 需先 npm i -D jsdom：发文件页、双存储页签、权限/扫码/删除的 DOM 级回归测试（59 项）
 ```
 
 ---
@@ -334,8 +349,8 @@ node scripts/r2-usage.js --push   # 同时推送到企业微信群机器人
 | GET | `/api/messages?afterId=N&limit=50` | 增量拉取（SSE 不可用时的兜底） |
 | GET | `/api/stream?sid=…&afterId=N` | **SSE 实时通道**，事件：`hello` / `backlog` / `message` / `online` |
 | POST | `/api/messages` | 发送消息，可带 `file` 字段（附件消息） |
-| POST | `/api/files/sign` | **申请上传许可**：`{name, size, mime, scene}` → 返回 `uploadUrl`（presigned PUT）/ `publicUrl` / `key` / `expireAt` |
-| GET | `/api/files` | **桶内对象列表 + 空间用量（仅管理员）**：`{objects, usage, truncated, cached}`；`?refresh=1` 跳过 15 秒缓存 |
+| POST | `/api/files/sign` | **申请上传许可**：`{name, size, mime, scene}`，scene 为 `chat`/`share`（R2）或 `keep`（Tigris）→ 返回 `uploadUrl`（presigned PUT）/ `publicUrl` / `key` / `store` / `expireAt`（keep 为 0 表示永久） |
+| GET | `/api/files?store=tmp\|keep` | **桶内对象列表 + 空间用量（仅管理员）**：`{store, objects, usage, truncated, cached}`；`?refresh=1` 跳过 15 秒缓存 |
 | GET | `/api/files/download?key=…` | **签发下载链接（仅管理员）**：返回 5 分钟有效的 presigned GET（带 `attachment` 头，原文件名） |
 | DELETE | `/api/files?key=…` | **删除单个对象（仅管理员）**：SigV4 `DeleteObject`，幂等，删完列表缓存立即失效 |
 | GET | `/api/files/scan?key=…` | **扫码下载入口（免登录）**：现签 5 分钟链接后 `302` 跳转，二维码可长期复用 |
@@ -345,7 +360,7 @@ node scripts/r2-usage.js --push   # 同时推送到企业微信群机器人
 | PATCH | `/api/users/:name` | **编辑用户（仅管理员）**：`{username?, password?, role?}` |
 | DELETE | `/api/users/:name` | **删除用户（仅管理员）** |
 | GET | `/api/state` | 在线成员与游标 |
-| GET | `/api/config` | 配置（含 `allowRegister` / `fileUpload` / `maxFileMB`） |
+| GET | `/api/config` | 配置（含 `allowRegister` / `fileUpload` / `keepUpload` / `maxFileMB`） |
 | GET | `/api/health` | 健康检查 |
 
 除登录、健康检查外，均需请求头 `X-Session-Id`；SSE 因浏览器 `EventSource` 无法带自定义头，改用查询参数 `?sid=`。

@@ -509,12 +509,9 @@ async function handleUserDelete(req, res, target) {
   return sendJson(res, 200, { ok: true, removed: removed.username, kicked });
 }
 
-// 签发一次性的上传许可。文件字节不经过本服务，直接由浏览器 PUT 到 R2。
+// 签发一次性的上传许可。文件字节不经过本服务，直接由浏览器 PUT 到对应的对象存储。
+// scene：chat（聊天附件，R2）/ share（独立分享，R2）/ keep（永久保存，Tigris）
 async function handleFileSign(req, res, session) {
-  if (!r2.isConfigured()) {
-    return fail(res, 503, 'FILE_UPLOAD_DISABLED', '文件上传功能未启用');
-  }
-
   let body;
   try {
     body = await readBody(req, 8 * 1024);
@@ -522,12 +519,17 @@ async function handleFileSign(req, res, session) {
     return fail(res, 400, 'INVALID_INPUT', err.message === 'BODY_TOO_LARGE' ? '请求体过大' : '请求格式错误');
   }
 
-  const scene = body.scene === 'share' ? 'share' : 'chat';
+  const scene = body.scene === 'keep' ? 'keep' : body.scene === 'chat' ? 'chat' : 'share';
+  const store = scene === 'keep' ? 'keep' : 'tmp';
+  if (!r2.isConfigured(store)) {
+    return fail(res, 503, 'FILE_UPLOAD_DISABLED', scene === 'keep' ? '永久存储未启用' : '文件上传功能未启用');
+  }
+
   const size = Number(body.size);
   if (!Number.isFinite(size) || size <= 0) {
     return fail(res, 400, 'INVALID_INPUT', '文件大小无效');
   }
-  if (size > r2.r2Env().maxBytes) {
+  if (size > r2.maxBytes(store)) {
     return fail(res, 413, 'FILE_TOO_LARGE', `单个文件不能超过 ${LIMITS.maxFileMB} MB`);
   }
 
@@ -541,38 +543,52 @@ async function handleFileSign(req, res, session) {
 
   let signed;
   try {
-    signed = r2.presignPut(key, contentType);
+    signed = r2.presignPut(store, key, contentType);
   } catch (err) {
     console.error('[files] 签名失败：', err.message);
     return fail(res, 500, 'SIGN_FAILED', '签发上传许可失败');
   }
 
   // 有新文件要进来，让列表缓存失效，避免别人 15 秒内看不到
-  fileListCache = { at: 0, data: null };
+  fileListCache[store] = { at: 0, data: null };
 
   return sendJson(res, 200, {
     uploadUrl: signed.uploadUrl,
-    publicUrl: signed.publicUrl,
+    // Tigris 无公开域：分享链接指向免登录的扫码下载入口，同样长期有效
+    publicUrl: signed.publicUrl || requestOrigin(req) + '/api/files/scan?key=' + encodeURIComponent(key),
     key,
     name,
     contentType,
     size,
+    store,
     expiresIn: signed.expiresIn,
-    expireAt: Date.now() + RETAIN_DAYS * 24 * 60 * 60 * 1000,
-    retainDays: RETAIN_DAYS,
+    expireAt: scene === 'keep' ? 0 : Date.now() + RETAIN_DAYS * 24 * 60 * 60 * 1000,
+    retainDays: scene === 'keep' ? 0 : RETAIN_DAYS,
   });
 }
 
-// 桶内对象列表 + 空间占用。列表有 15 秒缓存：翻页属于 Class A 操作，
-// 多人同时打开页面时不该每次都去敲 R2。
-let fileListCache = { at: 0, data: null };
+// 请求来源（扫码/分享链接要写明本服务地址）：内网 http，走反代时认 x-forwarded-proto
+function requestOrigin(req) {
+  const proto =
+    String(req.headers['x-forwarded-proto'] || '')
+      .split(',')[0]
+      .trim() || 'http';
+  const host = String(req.headers.host || '').trim();
+  return host ? `${proto}://${host}` : '';
+}
 
-function summarizeUsage(objects) {
-  const quotaBytes = r2.FREE_QUOTA_BYTES;
+// 桶内对象列表 + 空间占用，按存储分桶缓存（tmp=R2 / keep=Tigris）。
+// 列表有 15 秒缓存：翻页属于 Class A 操作，多人同时打开页面时不该每次都去敲存储。
+let fileListCache = { tmp: { at: 0, data: null }, keep: { at: 0, data: null } };
+
+function summarizeUsage(objects, store) {
+  const isKeep = store === 'keep';
+  const quotaBytes = isKeep ? null : r2.FREE_QUOTA_BYTES; // Tigris 无固定免费配额，只展示已用
   const bytes = objects.reduce((sum, o) => sum + (Number(o.size) || 0), 0);
   const byScene = {
     chat: { count: 0, bytes: 0 },
     share: { count: 0, bytes: 0 },
+    keep: { count: 0, bytes: 0 },
     other: { count: 0, bytes: 0 },
   };
   for (const o of objects) {
@@ -584,24 +600,26 @@ function summarizeUsage(objects) {
     count: objects.length,
     bytes,
     quotaBytes,
-    percent: quotaBytes ? Number(((bytes / quotaBytes) * 100).toFixed(2)) : 0,
+    percent: quotaBytes ? Number(((bytes / quotaBytes) * 100).toFixed(2)) : null,
     byScene,
   };
 }
 
-async function collectFiles(force) {
-  if (!force && fileListCache.data && Date.now() - fileListCache.at < r2.LIST_CACHE_MS) {
-    return Object.assign({}, fileListCache.data, { cached: true });
+async function collectFiles(force, store) {
+  const cache = fileListCache[store] || { at: 0, data: null };
+  if (!force && cache.data && Date.now() - cache.at < r2.LIST_CACHE_MS) {
+    return Object.assign({}, cache.data, { cached: true });
   }
-  const { objects, truncated } = await r2.listObjects();
+  const { objects, truncated } = await r2.listObjects(store);
   const data = {
+    store,
     objects,
     truncated,
-    usage: summarizeUsage(objects),
+    usage: summarizeUsage(objects, store),
     fetchedAt: Date.now(),
     cached: false,
   };
-  fileListCache = { at: Date.now(), data };
+  fileListCache[store] = { at: Date.now(), data };
   return data;
 }
 
@@ -616,23 +634,25 @@ function isValidFileKey(key) {
   );
 }
 
-// 按 key 找对象：优先用缓存，找不到再强制刷一次
-// （缓存可能落后于真实状态：刚上传完，或刚被生命周期删掉）
+// 按 key 找对象：key 首段决定查哪个桶（k/ → Tigris，其余 → R2），优先用缓存，
+// 找不到再强制刷一次（缓存可能落后于真实状态：刚上传完，或刚被生命周期删掉）
 async function findFile(key) {
-  const payload = await collectFiles(false);
+  const store = r2.storeFromKey(key);
+  const payload = await collectFiles(false, store);
   const hit = payload.objects.find((o) => o.key === key);
   if (hit) return hit;
-  const fresh = await collectFiles(true);
+  const fresh = await collectFiles(true, store);
   return fresh.objects.find((o) => o.key === key) || null;
 }
 
 async function handleFileList(req, res, url) {
-  if (!r2.isConfigured()) {
-    return fail(res, 503, 'FILE_UPLOAD_DISABLED', '文件功能未启用');
+  const store = url.searchParams.get('store') === 'keep' ? 'keep' : 'tmp';
+  if (!r2.isConfigured(store)) {
+    return fail(res, 503, 'FILE_UPLOAD_DISABLED', store === 'keep' ? '永久存储未启用' : '文件功能未启用');
   }
   const force = url.searchParams.get('refresh') === '1';
   try {
-    const payload = await collectFiles(force);
+    const payload = await collectFiles(force, store);
     return sendJson(res, 200, payload);
   } catch (err) {
     console.error('[files] 列表读取失败：', err.message);
@@ -646,10 +666,11 @@ async function handleFileList(req, res, url) {
 // 签发下载链接：302 不适合前端带自定义头，所以返回 JSON 由前端跳转。
 // 链接 5 分钟有效，附带 attachment 头，图片/PDF 也会直接另存而不是在新标签打开。
 async function handleFileDownload(req, res, url) {
-  if (!r2.isConfigured()) {
+  const key = String(url.searchParams.get('key') || '').trim();
+  const store = r2.storeFromKey(key);
+  if (!r2.isConfigured(store)) {
     return fail(res, 503, 'FILE_UPLOAD_DISABLED', '文件功能未启用');
   }
-  const key = String(url.searchParams.get('key') || '').trim();
   if (!isValidFileKey(key)) {
     return fail(res, 400, 'INVALID_KEY', '文件标识无效');
   }
@@ -666,7 +687,7 @@ async function handleFileDownload(req, res, url) {
   }
 
   try {
-    const signed = r2.presignGet(key, { expiresIn: 300, downloadName: target.name });
+    const signed = r2.presignGet(store, key, { expiresIn: 300, downloadName: target.name });
     return sendJson(res, 200, {
       url: signed.url,
       name: target.name,
@@ -684,10 +705,11 @@ async function handleFileDownload(req, res, url) {
 // 区别是这里强制走 attachment，图片/PDF 扫码后也会直接另存为原文件名。
 // 响应是 302 跳转到现签的 5 分钟链接，因此二维码本身永不过期。
 async function handleFileScan(req, res, url) {
-  if (!r2.isConfigured()) {
+  const key = String(url.searchParams.get('key') || '').trim();
+  const store = r2.storeFromKey(key);
+  if (!r2.isConfigured(store)) {
     return fail(res, 503, 'FILE_UPLOAD_DISABLED', '文件功能未启用');
   }
-  const key = String(url.searchParams.get('key') || '').trim();
   if (!isValidFileKey(key)) {
     return fail(res, 400, 'INVALID_KEY', '文件标识无效');
   }
@@ -705,7 +727,7 @@ async function handleFileScan(req, res, url) {
 
   let signed;
   try {
-    signed = r2.presignGet(key, { expiresIn: 300, downloadName: target.name });
+    signed = r2.presignGet(store, key, { expiresIn: 300, downloadName: target.name });
   } catch (err) {
     console.error('[files] 扫码下载签名失败：', err.message);
     return fail(res, 500, 'SIGN_FAILED', '签发下载链接失败');
@@ -717,10 +739,11 @@ async function handleFileScan(req, res, url) {
 
 // 删除单个对象。仅管理员可调用，删完立刻让列表缓存失效。
 async function handleFileDelete(req, res, url) {
-  if (!r2.isConfigured()) {
+  const key = String(url.searchParams.get('key') || '').trim();
+  const store = r2.storeFromKey(key);
+  if (!r2.isConfigured(store)) {
     return fail(res, 503, 'FILE_UPLOAD_DISABLED', '文件功能未启用');
   }
-  const key = String(url.searchParams.get('key') || '').trim();
   if (!isValidFileKey(key)) {
     return fail(res, 400, 'INVALID_KEY', '文件标识无效');
   }
@@ -737,13 +760,13 @@ async function handleFileDelete(req, res, url) {
   }
 
   try {
-    await r2.deleteObject(key);
+    await r2.deleteObject(store, key);
   } catch (err) {
     console.error('[files] 删除失败：', err.message);
     return fail(res, 502, 'DELETE_FAILED', '删除失败，请稍后重试');
   }
 
-  fileListCache = { at: 0, data: null };
+  fileListCache[store] = { at: 0, data: null };
   console.log(`[files] 已删除 ${key}（${target.name}，${target.size} 字节）`);
   return sendJson(res, 200, { ok: true, key, name: target.name });
 }
@@ -752,17 +775,18 @@ async function handleFileDelete(req, res, url) {
 // 避免客户端伪造一条指向外站的「文件消息」。
 function normalizeIncomingFile(input) {
   if (!input || typeof input !== 'object') return null;
-  if (!r2.isConfigured()) return null;
+  if (!r2.isConfigured('tmp')) return null;
 
   const key = String(input.key || '');
+  // 消息附件一律走临时存储（R2），永久存储的文件只存在于「文件」页
   if (!/^[cs]\/[0-9a-f]{32}\//.test(key)) return null;
 
   const url = String(input.url || '');
-  const base = r2.publicBase();
+  const base = r2.publicBase('tmp');
   if (!base || !url.startsWith(`${base}/`)) return null;
 
   const size = Number(input.size);
-  if (!Number.isFinite(size) || size <= 0 || size > r2.r2Env().maxBytes) return null;
+  if (!Number.isFinite(size) || size <= 0 || size > r2.maxBytes('tmp')) return null;
 
   const name = r2.sanitizeFilename(input.name);
   if (!name) return null;
@@ -867,7 +891,8 @@ async function handleApi(req, res, url) {
         200,
         Object.assign({}, LIMITS, {
           allowRegister: registerAllowed(),
-          fileUpload: r2.isConfigured(),
+          fileUpload: r2.isConfigured('tmp'),
+          keepUpload: r2.keepConfigured(),
           retainFileDays: RETAIN_DAYS,
         }),
       );

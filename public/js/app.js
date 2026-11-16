@@ -58,6 +58,9 @@
     filesLoading: false,
     previewing: null,
     qrItem: null,
+    // 云端文件当前页签：tmp = R2 临时（7 天）/ keep = Tigris 永久
+    fileStore: 'tmp',
+    keepUpload: false,
   };
 
   var el = {};
@@ -152,6 +155,9 @@
     el.cloudList = $('cf-list');
     el.cloudSub = $('cf-sub');
     el.cloudEmpty = $('cf-empty');
+    el.cfTabs = $('cf-tabs');
+    el.cfTabTmp = $('cf-tab-tmp');
+    el.cfTabKeep = $('cf-tab-keep');
     el.preview = $('preview');
     el.previewMask = $('preview-mask');
     el.previewName = $('preview-name');
@@ -329,6 +335,7 @@
   // 服务端未配置 R2 时整体隐藏文件入口，功能消失但不影响消息收发
   function applyFilePolicy(cfg) {
     state.fileUpload = Boolean(cfg && cfg.fileUpload);
+    state.keepUpload = Boolean(cfg && cfg.keepUpload);
     if (cfg && typeof cfg.maxFileMB === 'number' && cfg.maxFileMB > 0) {
       state.maxFileMB = cfg.maxFileMB;
     }
@@ -339,6 +346,9 @@
     if (el.navFiles) el.navFiles.hidden = !state.fileUpload;
     if (el.filesRetain) el.filesRetain.textContent = String(state.retainFileDays);
     if (el.shareHint) syncShareHint();
+    if (el.cfTabKeep) el.cfTabKeep.hidden = !state.keepUpload;
+    // 永久存储被关闭时退回临时页签
+    if (!state.keepUpload && state.fileStore === 'keep') switchStore('tmp');
     if (!state.fileUpload) {
       if (el.usageCard) el.usageCard.hidden = true;
       if (el.cloudFiles) el.cloudFiles.hidden = true;
@@ -887,7 +897,9 @@
   }
 
   function expireText(ts) {
-    var left = Number(ts) - Date.now();
+    var n = Number(ts);
+    if (!n) return '永久保存';
+    var left = n - Date.now();
     if (!isFinite(left) || left <= 0) return '已过期';
     var days = Math.floor(left / 86400000);
     if (days >= 1) return days + ' 天后失效';
@@ -926,6 +938,7 @@
               mime: ticket.contentType,
               url: ticket.publicUrl,
               expireAt: ticket.expireAt,
+              store: ticket.store || (scene === 'keep' ? 'keep' : 'tmp'),
             });
           } else if (xhr.status === 403) {
             reject(new Error('上传许可已失效，请重试'));
@@ -1132,22 +1145,30 @@
   /* ---------------- 发文件（独立分享） ---------------- */
 
   function syncShareHint() {
-    el.shareHint.textContent = state.fileUpload
-      ? '单个文件最大 ' + state.maxFileMB + ' MB · 文件保存 ' + state.retainFileDays + ' 天'
-      : '文件功能未配置，请联系管理员填写 R2 凭据';
-    el.shareDrop.classList.toggle('is-disabled', !state.fileUpload);
+    if (!state.fileUpload) {
+      el.shareHint.textContent = '文件功能未配置，请联系管理员填写存储凭据';
+      el.shareDrop.classList.toggle('is-disabled', true);
+      return;
+    }
+    var keep = state.fileStore === 'keep' && state.keepUpload;
+    el.shareHint.textContent = keep
+      ? '单个文件最大 ' + state.maxFileMB + ' MB · 永久保存（Tigris）'
+      : '单个文件最大 ' + state.maxFileMB + ' MB · 文件保存 ' + state.retainFileDays + ' 天';
+    el.shareDrop.classList.toggle('is-disabled', false);
   }
 
   // 「再传一个」：只清当前结果，不动本地历史
   function resetShare() {
-    if (state.uploadXhrs.share) {
-      try {
-        state.uploadXhrs.share.abort();
-      } catch (err) {
-        /* 忽略 */
+    ['share', 'keep'].forEach(function (scene) {
+      if (state.uploadXhrs[scene]) {
+        try {
+          state.uploadXhrs[scene].abort();
+        } catch (err) {
+          /* 忽略 */
+        }
+        state.uploadXhrs[scene] = null;
       }
-      state.uploadXhrs.share = null;
-    }
+    });
     state.lastShare = null;
     el.shareDrop.hidden = false;
     el.shareProgress.hidden = true;
@@ -1183,6 +1204,22 @@
     if (syncCloudVisibility()) {
       loadCloudFiles(!state.filesAt || Date.now() - state.filesAt > 15000);
     }
+  }
+
+  // 切换临时/永久存储页签：清空当前列表状态，再按新存储重新拉取
+  function switchStore(store) {
+    if (store !== 'keep' && store !== 'tmp') store = 'tmp';
+    if (state.fileStore === store) return;
+    state.fileStore = store;
+    if (el.cfTabTmp) el.cfTabTmp.classList.toggle('is-active', store === 'tmp');
+    if (el.cfTabKeep) el.cfTabKeep.classList.toggle('is-active', store === 'keep');
+    state.files = [];
+    state.filesUsage = null;
+    state.filesAt = 0;
+    renderUsage(null);
+    renderCloudFiles();
+    syncShareHint();
+    loadCloudFiles(true);
   }
 
   function shareHistoryKey() {
@@ -1257,7 +1294,8 @@
     el.shareHistory.hidden = !items.length;
 
     items.forEach(function (item) {
-      var expired = Date.now() > Number(item.expireAt);
+      var exp = Number(item.expireAt);
+      var expired = exp > 0 && Date.now() > exp;
       var row = document.createElement('div');
       row.className = 'sh-row' + (expired ? ' is-expired' : '');
 
@@ -1273,7 +1311,11 @@
       name.title = item.name;
       var sub = document.createElement('div');
       sub.className = 'sh-sub';
-      sub.textContent = fmtSize(item.size) + ' · ' + expireText(item.expireAt);
+      sub.textContent =
+        fmtSize(item.size) +
+        ' · ' +
+        (exp > 0 ? expireText(item.expireAt) : '永久保存') +
+        (item.store === 'keep' ? ' · Tigris' : '');
       meta.appendChild(name);
       meta.appendChild(sub);
 
@@ -1317,6 +1359,8 @@
     if (file.size > state.maxFileMB * 1024 * 1024) {
       return toast('文件超过 ' + state.maxFileMB + ' MB');
     }
+    // 当前页签决定去向：临时页签传 R2（7 天），永久页签传 Tigris（不清理）
+    var scene = state.fileStore === 'keep' && state.keepUpload ? 'keep' : 'share';
 
     el.shareDrop.hidden = true;
     el.shareResult.hidden = true;
@@ -1367,7 +1411,9 @@
     el.srName.textContent = meta.name;
     el.srName.title = meta.name;
     el.srSub.textContent =
-      fmtSize(meta.size) + ' · ' + expireText(meta.expireAt) + ' · 保存 ' + state.retainFileDays + ' 天';
+      fmtSize(meta.size) +
+      ' · ' +
+      (Number(meta.expireAt) > 0 ? expireText(meta.expireAt) + ' · 保存 ' + state.retainFileDays + ' 天' : '永久保存 · Tigris');
     el.srUrl.value = meta.url;
     el.srOpen.href = meta.url;
     el.srCopy.dataset.url = meta.url;
@@ -1426,11 +1472,20 @@
     }
     el.usageCard.hidden = false;
     el.usageUsed.textContent = fmtSize(usage.bytes);
-    el.usageQuota.textContent = '/ ' + fmtSize(usage.quotaBytes) + ' 免费额度';
-    el.usagePct.textContent = usage.percent + '%';
-    var width = Math.max(0, Math.min(100, Number(usage.percent) || 0));
-    el.usageFill.style.width = (width > 0 && width < 1 ? 1 : width) + '%';
-    el.usageFill.classList.toggle('is-warn', width >= 80);
+    if (usage.quotaBytes) {
+      // R2：固定免费额度 + 百分比进度条
+      el.usageQuota.textContent = '/ ' + fmtSize(usage.quotaBytes) + ' 免费额度';
+      el.usagePct.textContent = usage.percent + '%';
+      var width = Math.max(0, Math.min(100, Number(usage.percent) || 0));
+      el.usageFill.style.width = (width > 0 && width < 1 ? 1 : width) + '%';
+      el.usageFill.classList.toggle('is-warn', width >= 80);
+    } else {
+      // Tigris：无固定免费配额，只展示已用与对象数
+      el.usageQuota.textContent = ' · ' + usage.count + ' 个文件 · 永久保存';
+      el.usagePct.textContent = '';
+      el.usageFill.style.width = '0%';
+      el.usageFill.classList.toggle('is-warn', false);
+    }
 
     var chat = (usage.byScene && usage.byScene.chat) || { count: 0, bytes: 0 };
     var share = (usage.byScene && usage.byScene.share) || { count: 0, bytes: 0 };
@@ -1455,7 +1510,8 @@
       : '';
 
     shown.forEach(function (item) {
-      var expired = item.expireAt && Date.now() > item.expireAt;
+      var exp = Number(item.expireAt);
+      var expired = exp > 0 && Date.now() > exp;
       var kind = previewKind(item.name);
       var row = document.createElement('div');
       row.className = 'cf-row' + (expired ? ' is-expired' : '');
@@ -1485,7 +1541,7 @@
         ' · ' +
         fmtTime(item.createdAt) +
         ' · ' +
-        (expired ? '已过期，待清理' : expireText(item.expireAt));
+        (exp > 0 ? (expired ? '已过期，待清理' : expireText(item.expireAt)) : '永久保存');
       meta.appendChild(name);
       meta.appendChild(sub);
 
@@ -1566,10 +1622,11 @@
       syncCloudVisibility();
       return;
     }
+    var store = state.fileStore === 'keep' && state.keepUpload ? 'keep' : 'tmp';
     state.filesLoading = true;
     el.filesRefresh.disabled = true;
 
-    api('GET', '/api/files' + (force ? '?refresh=1' : '')).then(
+    api('GET', '/api/files?store=' + store + (force ? '&refresh=1' : '')).then(
       function (data) {
         state.filesLoading = false;
         el.filesRefresh.disabled = false;
@@ -2171,6 +2228,11 @@
 
     el.filesRefresh.addEventListener('click', function () {
       loadCloudFiles(true);
+    });
+
+    el.cfTabs.addEventListener('click', function (event) {
+      var tab = event.target.closest ? event.target.closest('.cf-tab') : null;
+      if (tab && tab.dataset && tab.dataset.store) switchStore(tab.dataset.store);
     });
 
     el.previewClose.addEventListener('click', closePreview);

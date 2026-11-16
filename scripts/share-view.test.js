@@ -64,7 +64,7 @@ function makeFetch(log, role) {
     const u = String(url);
     let data = {};
     if (u.indexOf('/api/config') === 0) {
-      data = { maxOnline: 20, allowRegister: false, fileUpload: true, maxFileMB: 100, retainFileDays: 7 };
+      data = { maxOnline: 20, allowRegister: false, fileUpload: true, keepUpload: true, maxFileMB: 100, retainFileDays: 7 };
     } else if (u.split('?')[0] === '/api/me') {
       data = {
         me: { username: meRole === 'admin' ? 'admin' : 'bob', deviceName: 'jsdom', displayName: 'jsdom', role: meRole },
@@ -88,6 +88,38 @@ function makeFetch(log, role) {
       deletedKeys.add(decodeURIComponent((u.split('key=')[1] || '')));
       data = { ok: true, key: 's/a1/照片.png', name: '照片.png' };
     } else if (u.split('?')[0] === '/api/files') {
+      if (u.indexOf('store=keep') >= 0) {
+        // 永久存储（Tigris）：无配额、不过期
+        data = {
+          store: 'keep',
+          usage: {
+            count: 1,
+            bytes: 5242880,
+            quotaBytes: null,
+            percent: null,
+            byScene: {
+              chat: { count: 0, bytes: 0 },
+              share: { count: 0, bytes: 0 },
+              keep: { count: 1, bytes: 5242880 },
+              other: { count: 0, bytes: 0 },
+            },
+          },
+          objects: [
+            {
+              key: 'k/k1/备份.zip',
+              name: '备份.zip',
+              size: 5242880,
+              createdAt: Date.now() - 600000,
+              expireAt: 0,
+              scene: 'keep',
+              url: '',
+            },
+          ],
+          truncated: false,
+          cached: false,
+          fetchedAt: Date.now(),
+        };
+      } else {
       data = {
         usage: {
           count: 2,
@@ -124,6 +156,7 @@ function makeFetch(log, role) {
         cached: false,
         fetchedAt: Date.now(),
       };
+      }
     } else if (u.indexOf('/api/messages') === 0 && method === 'POST') {
       const body = JSON.parse((opts && opts.body) || '{}');
       data = {
@@ -388,6 +421,27 @@ function dropFile(win, doc, name, type, size) {
   ok('云端文件区隐藏', M.doc.getElementById('cloud-files').hidden === true);
   ok('空间用量卡片隐藏', M.doc.getElementById('usage-card').hidden === true);
   ok('成员根本没请求列表接口', M.calls.indexOf('GET /api/files') < 0, M.calls.join(','));
+
+  /* ---------- 场景 10：临时 / 永久存储页签 ---------- */
+  console.log('\n[10] 永久存储（Tigris）页签');
+  ok('永久页签可见（服务端上报 keepUpload）', E.doc.getElementById('cf-tab-keep').hidden === false);
+  E.doc.getElementById('cf-tab-keep').click();
+  await sleep(120);
+  ok('切换后列表为永久存储内容', E.doc.getElementById('cf-list').textContent.indexOf('备份.zip') >= 0);
+  ok('永久文件不过期', E.doc.getElementById('cf-list').textContent.indexOf('永久保存') >= 0);
+  ok(
+    '用量卡片按无配额展示',
+    E.doc.getElementById('usage-quota').textContent.indexOf('永久保存') >= 0,
+    E.doc.getElementById('usage-quota').textContent,
+  );
+  E.doc.getElementById('cf-tab-tmp').click();
+  await sleep(120);
+  // 场景 8 已删除「照片.png」，临时列表应只剩「说明.pdf」
+  ok(
+    '切回临时页签列表恢复',
+    E.doc.getElementById('cf-list').textContent.indexOf('说明.pdf') >= 0 &&
+      E.doc.getElementById('cf-list').textContent.indexOf('备份.zip') < 0,
+  );
 
   /* ---------- 汇总 ---------- */
   console.log('\n----------------------------------------');
