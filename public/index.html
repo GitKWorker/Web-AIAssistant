@@ -116,9 +116,20 @@
       <header class="topbar">
         <div class="topbar-text">
           <h1>文件</h1>
-          <p>上传生成临时链接 · 云端文件区仅管理员可见 · 保存 <span id="files-retain">7</span> 天后自动清理</p>
+          <p>上传去向跟随顶部页签 · 云端文件区仅管理员可见</p>
         </div>
       </header>
+
+      <div class="store-tabs" id="cf-tabs">
+        <button type="button" class="store-tab is-active" data-store="tmp" id="cf-tab-tmp">
+          <span class="st-name">临时存储</span>
+          <span class="st-sub">7 天自动清理</span>
+        </button>
+        <button type="button" class="store-tab" data-store="keep" id="cf-tab-keep" hidden>
+          <span class="st-name">永久存储</span>
+          <span class="st-sub">永不清理</span>
+        </button>
+      </div>
 
       <div class="files-body">
         <div class="usage-card" id="usage-card" hidden>
@@ -180,14 +191,7 @@
 
         <div class="cloud-files" id="cloud-files" hidden>
           <div class="cf-head">
-            <div class="cf-tabs" id="cf-tabs">
-              <button type="button" class="cf-tab is-active" data-store="tmp" id="cf-tab-tmp">
-                临时存储<span class="cf-tab-sub">7 天清理</span>
-              </button>
-              <button type="button" class="cf-tab" data-store="keep" id="cf-tab-keep" hidden>
-                永久存储<span class="cf-tab-sub">Tigris</span>
-              </button>
-            </div>
+            <span class="cf-title">云端文件</span>
             <span class="cf-sub" id="cf-sub"></span>
           </div>
           <div class="cf-list" id="cf-list"></div>

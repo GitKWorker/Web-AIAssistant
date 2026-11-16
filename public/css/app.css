@@ -941,28 +941,38 @@ input:focus, select:focus, textarea:focus {
 .cf-head { display: flex; align-items: baseline; justify-content: space-between; margin: 2px 2px 6px; }
 .cf-title { font-size: 12.5px; color: var(--text-2); }
 .cf-sub { font-size: 11px; color: var(--text-3); }
-/* 临时/永久存储切换页签 */
-.cf-tabs { display: flex; gap: 4px; }
-.cf-tab {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 5px;
-  padding: 4px 10px;
+/* 临时/永久存储切换：页面顶部的分段控件，上传去向与下方列表都跟随它 */
+.store-tabs {
+  width: 100%;
+  max-width: 620px;
+  margin: 0 auto;
+  padding: 0 22px 12px;
+  display: flex;
+  gap: 8px;
+}
+.store-tab {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  padding: 9px 10px 8px;
   border: 0.5px solid var(--line);
   border-radius: var(--radius);
   background: transparent;
   color: var(--text-2);
-  font-size: 12px;
   cursor: pointer;
+  transition: background 150ms, border-color 150ms;
 }
-.cf-tab:hover { background: var(--surface-3); }
-.cf-tab.is-active {
+.store-tab:hover { background: var(--surface-2); }
+.store-tab.is-active {
   background: var(--surface-3);
   border-color: var(--line-strong);
-  color: var(--text);
-  font-weight: 500;
+  box-shadow: inset 0 -2px 0 var(--accent);
 }
-.cf-tab-sub { font-size: 10.5px; color: var(--text-3); }
+.store-tab .st-name { font-size: 12.5px; font-weight: 500; color: var(--text); }
+.store-tab .st-sub { font-size: 10.5px; color: var(--text-3); }
+.store-tab.is-active .st-sub { color: var(--text-2); }
 .cf-list { display: flex; flex-direction: column; gap: 6px; }
 .cf-empty {
   padding: 16px;

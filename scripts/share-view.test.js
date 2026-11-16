@@ -418,12 +418,16 @@ function dropFile(win, doc, name, type, size) {
   nav(M.doc, 'files');
   await sleep(80);
   ok('上传区对成员可见', M.doc.getElementById('share-drop').hidden === false);
+  ok('顶部页签对成员可见（控制上传去向）', M.doc.getElementById('cf-tabs').hidden === false);
   ok('云端文件区隐藏', M.doc.getElementById('cloud-files').hidden === true);
   ok('空间用量卡片隐藏', M.doc.getElementById('usage-card').hidden === true);
   ok('成员根本没请求列表接口', M.calls.indexOf('GET /api/files') < 0, M.calls.join(','));
 
   /* ---------- 场景 10：临时 / 永久存储页签 ---------- */
   console.log('\n[10] 永久存储（Tigris）页签');
+  ok('页签位于页面顶部（不在云端列表内）',
+    E.doc.getElementById('cf-tabs').closest('#cloud-files') === null &&
+      E.doc.getElementById('cf-tabs').nextElementSibling.classList.contains('files-body'));
   ok('永久页签可见（服务端上报 keepUpload）', E.doc.getElementById('cf-tab-keep').hidden === false);
   E.doc.getElementById('cf-tab-keep').click();
   await sleep(120);

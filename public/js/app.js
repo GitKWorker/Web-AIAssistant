@@ -346,6 +346,7 @@
     if (el.navFiles) el.navFiles.hidden = !state.fileUpload;
     if (el.filesRetain) el.filesRetain.textContent = String(state.retainFileDays);
     if (el.shareHint) syncShareHint();
+    if (el.cfTabs) el.cfTabs.hidden = !state.fileUpload;
     if (el.cfTabKeep) el.cfTabKeep.hidden = !state.keepUpload;
     // 永久存储被关闭时退回临时页签
     if (!state.keepUpload && state.fileStore === 'keep') switchStore('tmp');
@@ -2231,7 +2232,7 @@
     });
 
     el.cfTabs.addEventListener('click', function (event) {
-      var tab = event.target.closest ? event.target.closest('.cf-tab') : null;
+      var tab = event.target.closest ? event.target.closest('.store-tab') : null;
       if (tab && tab.dataset && tab.dataset.store) switchStore(tab.dataset.store);
     });
 
