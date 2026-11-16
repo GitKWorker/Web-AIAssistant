@@ -262,11 +262,11 @@ function publicMe(session) {
   };
 }
 
-function requireAdmin(req, res) {
+function requireAdmin(req, res, message) {
   const session = requireSession(req, res);
   if (!session) return null;
   if (!accounts.isAdmin(session.username)) {
-    fail(res, 403, 'FORBIDDEN', '仅管理员可以管理账号');
+    fail(res, 403, 'FORBIDDEN', message || '仅管理员可以管理账号');
     return null;
   }
   return session;
@@ -605,6 +605,27 @@ async function collectFiles(force) {
   return data;
 }
 
+// 对象键合法性：只接受我们签出的 <scene>/<hex>/<name> 结构
+function isValidFileKey(key) {
+  return (
+    typeof key === 'string' &&
+    key.length > 0 &&
+    key.length <= 400 &&
+    key.indexOf('..') < 0 &&
+    /^[^/]+\/[^/]+\//.test(key)
+  );
+}
+
+// 按 key 找对象：优先用缓存，找不到再强制刷一次
+// （缓存可能落后于真实状态：刚上传完，或刚被生命周期删掉）
+async function findFile(key) {
+  const payload = await collectFiles(false);
+  const hit = payload.objects.find((o) => o.key === key);
+  if (hit) return hit;
+  const fresh = await collectFiles(true);
+  return fresh.objects.find((o) => o.key === key) || null;
+}
+
 async function handleFileList(req, res, url) {
   if (!r2.isConfigured()) {
     return fail(res, 503, 'FILE_UPLOAD_DISABLED', '文件功能未启用');
@@ -629,19 +650,13 @@ async function handleFileDownload(req, res, url) {
     return fail(res, 503, 'FILE_UPLOAD_DISABLED', '文件功能未启用');
   }
   const key = String(url.searchParams.get('key') || '').trim();
-  if (!key || key.length > 400 || key.indexOf('..') >= 0 || !/^[^/]+\/[^/]+\//.test(key)) {
+  if (!isValidFileKey(key)) {
     return fail(res, 400, 'INVALID_KEY', '文件标识无效');
   }
 
   let target = null;
   try {
-    const payload = await collectFiles(false);
-    target = payload.objects.find((o) => o.key === key) || null;
-    if (!target) {
-      // 缓存可能落后于真实状态（刚上传 / 刚被生命周期删除），强制刷一次
-      const fresh = await collectFiles(true);
-      target = fresh.objects.find((o) => o.key === key) || null;
-    }
+    target = await findFile(key);
   } catch (err) {
     console.error('[files] 下载前校验失败：', err.message);
     return fail(res, 502, 'LIST_FAILED', '读取文件信息失败');
@@ -662,6 +677,75 @@ async function handleFileDownload(req, res, url) {
     console.error('[files] 下载签名失败：', err.message);
     return fail(res, 500, 'SIGN_FAILED', '签发下载链接失败');
   }
+}
+
+// 扫码下载：手机扫码时没有登录态，所以这条路径免登录。
+// 保密性由 key 里的 32 位随机 hex 提供，与公开域直链同等强度；
+// 区别是这里强制走 attachment，图片/PDF 扫码后也会直接另存为原文件名。
+// 响应是 302 跳转到现签的 5 分钟链接，因此二维码本身永不过期。
+async function handleFileScan(req, res, url) {
+  if (!r2.isConfigured()) {
+    return fail(res, 503, 'FILE_UPLOAD_DISABLED', '文件功能未启用');
+  }
+  const key = String(url.searchParams.get('key') || '').trim();
+  if (!isValidFileKey(key)) {
+    return fail(res, 400, 'INVALID_KEY', '文件标识无效');
+  }
+
+  let target = null;
+  try {
+    target = await findFile(key);
+  } catch (err) {
+    console.error('[files] 扫码下载校验失败：', err.message);
+    return fail(res, 502, 'LIST_FAILED', '读取文件信息失败');
+  }
+  if (!target) {
+    return fail(res, 404, 'NOT_FOUND', '文件不存在或已过期清理');
+  }
+
+  let signed;
+  try {
+    signed = r2.presignGet(key, { expiresIn: 300, downloadName: target.name });
+  } catch (err) {
+    console.error('[files] 扫码下载签名失败：', err.message);
+    return fail(res, 500, 'SIGN_FAILED', '签发下载链接失败');
+  }
+  res.writeHead(302, { Location: signed.url, 'Cache-Control': 'no-store' });
+  res.end();
+  return undefined;
+}
+
+// 删除单个对象。仅管理员可调用，删完立刻让列表缓存失效。
+async function handleFileDelete(req, res, url) {
+  if (!r2.isConfigured()) {
+    return fail(res, 503, 'FILE_UPLOAD_DISABLED', '文件功能未启用');
+  }
+  const key = String(url.searchParams.get('key') || '').trim();
+  if (!isValidFileKey(key)) {
+    return fail(res, 400, 'INVALID_KEY', '文件标识无效');
+  }
+
+  let target = null;
+  try {
+    target = await findFile(key);
+  } catch (err) {
+    console.error('[files] 删除前校验失败：', err.message);
+    return fail(res, 502, 'LIST_FAILED', '读取文件信息失败');
+  }
+  if (!target) {
+    return fail(res, 404, 'NOT_FOUND', '文件不存在或已过期清理');
+  }
+
+  try {
+    await r2.deleteObject(key);
+  } catch (err) {
+    console.error('[files] 删除失败：', err.message);
+    return fail(res, 502, 'DELETE_FAILED', '删除失败，请稍后重试');
+  }
+
+  fileListCache = { at: 0, data: null };
+  console.log(`[files] 已删除 ${key}（${target.name}，${target.size} 字节）`);
+  return sendJson(res, 200, { ok: true, key, name: target.name });
 }
 
 // 校验前端回传的文件元数据：只接受我们自己签出的 key 前缀，且 URL 必须落在公开域上，
@@ -836,15 +920,26 @@ async function handleApi(req, res, url) {
   }
 
   if (route === 'GET /api/files') {
-    const session = requireSession(req, res);
+    const session = requireAdmin(req, res, '仅管理员可以查看云端文件列表');
     if (!session) return undefined;
     return handleFileList(req, res, url);
   }
 
   if (route === 'GET /api/files/download') {
-    const session = requireSession(req, res);
+    const session = requireAdmin(req, res, '仅管理员可以下载云端文件');
     if (!session) return undefined;
     return handleFileDownload(req, res, url);
+  }
+
+  if (route === 'DELETE /api/files') {
+    const session = requireAdmin(req, res, '仅管理员可以删除云端文件');
+    if (!session) return undefined;
+    return handleFileDelete(req, res, url);
+  }
+
+  // 扫码下载走免登录：手机扫码没有登录态，key 本身即凭证
+  if (route === 'GET /api/files/scan') {
+    return handleFileScan(req, res, url);
   }
 
   if (route === 'GET /api/messages' || route === 'POST /api/messages') {

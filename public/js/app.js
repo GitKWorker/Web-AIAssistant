@@ -57,6 +57,7 @@
     filesAt: 0,
     filesLoading: false,
     previewing: null,
+    qrItem: null,
   };
 
   var el = {};
@@ -158,6 +159,13 @@
     el.previewMeta = $('preview-meta');
     el.previewClose = $('preview-close');
     el.previewDownload = $('preview-download');
+    el.qrModal = $('qr-modal');
+    el.qrMask = $('qr-mask');
+    el.qrClose = $('qr-close');
+    el.qrCanvas = $('qr-canvas');
+    el.qrFile = $('qr-file');
+    el.qrUrl = $('qr-url');
+    el.qrCopy = $('qr-copy');
   }
 
   /* ---------------- 通用 ---------------- */
@@ -335,6 +343,21 @@
       if (el.usageCard) el.usageCard.hidden = true;
       if (el.cloudFiles) el.cloudFiles.hidden = true;
     }
+    syncCloudVisibility();
+  }
+
+  // 云端文件列表（含空间用量）只对管理员开放：服务端也会拦，
+  // 这里同步隐藏入口，普通成员连请求都不发。
+  function canSeeCloudFiles() {
+    return Boolean(state.fileUpload) && isAdmin();
+  }
+
+  function syncCloudVisibility() {
+    if (canSeeCloudFiles()) return true;
+    if (el.usageCard) el.usageCard.hidden = true;
+    if (el.cloudFiles) el.cloudFiles.hidden = true;
+    if (el.cloudList) el.cloudList.textContent = '';
+    return false;
   }
 
   function handleAuthSubmit(event) {
@@ -396,6 +419,14 @@
     el.meDevice.textContent = data.me.deviceName;
     el.meAvatar.textContent = firstChar(data.me.username);
     el.authDevice.value = data.me.deviceName;
+
+    // 角色这时才知道，云端文件区按角色显隐
+    if (!canSeeCloudFiles()) {
+      state.files = [];
+      state.filesUsage = null;
+      state.filesAt = 0;
+    }
+    syncCloudVisibility();
 
     updateOnline(state.online);
     setConnected(true);
@@ -1149,7 +1180,9 @@
     }
     renderShareHistory();
     // 距离上次读取超过 15 秒就强制刷新，避免刚在聊天里发完附件这里看不到
-    loadCloudFiles(!state.filesAt || Date.now() - state.filesAt > 15000);
+    if (syncCloudVisibility()) {
+      loadCloudFiles(!state.filesAt || Date.now() - state.filesAt > 15000);
+    }
   }
 
   function shareHistoryKey() {
@@ -1411,6 +1444,7 @@
   }
 
   function renderCloudFiles() {
+    if (!syncCloudVisibility()) return;
     var items = state.files || [];
     var shown = items.slice(0, 100);
     el.cloudFiles.hidden = false;
@@ -1488,6 +1522,36 @@
       });
       btns.appendChild(link);
 
+      var qrBtn = document.createElement('button');
+      qrBtn.type = 'button';
+      qrBtn.className = 'btn-ghost btn-sm cf-icon';
+      qrBtn.title = '扫码下载';
+      qrBtn.setAttribute('aria-label', '扫码下载');
+      qrBtn.innerHTML =
+        '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">' +
+        '<rect x="3" y="3" width="7" height="7" rx="1.2"/><rect x="14" y="3" width="7" height="7" rx="1.2"/>' +
+        '<rect x="3" y="14" width="7" height="7" rx="1.2"/><path d="M14 14h3v3h-3z"/>' +
+        '<path d="M20.5 14v.01"/><path d="M14 20.5v.01"/><path d="M20.5 20.5v.01"/><path d="M17.5 17.5v.01"/></svg>';
+      qrBtn.addEventListener('click', function () {
+        openQrModal(item);
+      });
+      btns.appendChild(qrBtn);
+
+      var delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.className = 'btn-ghost btn-sm cf-icon cf-danger';
+      delBtn.title = '删除文件';
+      delBtn.setAttribute('aria-label', '删除文件');
+      delBtn.innerHTML =
+        '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">' +
+        '<path d="M4 7h16"/><path d="M10 11v6"/><path d="M14 11v6"/>' +
+        '<path d="M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12"/>' +
+        '<path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>';
+      delBtn.addEventListener('click', function () {
+        deleteCloudFile(item, delBtn);
+      });
+      btns.appendChild(delBtn);
+
       row.appendChild(thumb);
       row.appendChild(meta);
       row.appendChild(btns);
@@ -1497,6 +1561,11 @@
 
   function loadCloudFiles(force) {
     if (!state.fileUpload || state.filesLoading) return;
+    // 普通成员没有权限：直接不发请求，省得每次都吃一个 403
+    if (!canSeeCloudFiles()) {
+      syncCloudVisibility();
+      return;
+    }
     state.filesLoading = true;
     el.filesRefresh.disabled = true;
 
@@ -1514,6 +1583,10 @@
         state.filesLoading = false;
         el.filesRefresh.disabled = false;
         if (err && err.status === 401) return;
+        if (err && err.status === 403) {
+          syncCloudVisibility();
+          return;
+        }
         el.usageCard.hidden = true;
         el.cloudFiles.hidden = true;
         toast(err.message || '读取文件列表失败');
@@ -1583,6 +1656,70 @@
         restore();
         if (err && err.status === 401) return;
         toast(err.message || '下载失败');
+      },
+    );
+  }
+
+  /* ---------------- 扫码下载 / 删除 ---------------- */
+
+  // 二维码里放 /api/files/scan?key=...：扫码时服务端现签 5 分钟下载链接再 302，
+  // 所以二维码本身不会过期；手机上不用登录也能下载，且强制另存为原文件名。
+  function scanUrl(item) {
+    return window.location.origin + '/api/files/scan?key=' + encodeURIComponent(item.key);
+  }
+
+  function openQrModal(item) {
+    if (!item) return;
+    var url = scanUrl(item);
+    state.qrItem = item;
+    el.qrCanvas.textContent = '';
+    if (typeof window.qrcode === 'function') {
+      try {
+        var qr = window.qrcode(0, 'M');
+        qr.addData(url);
+        qr.make();
+        el.qrCanvas.innerHTML = qr.createSvgTag({ cellSize: 4, margin: 1, scalable: true });
+      } catch (err) {
+        el.qrCanvas.textContent = '二维码生成失败';
+      }
+    } else {
+      el.qrCanvas.textContent = '二维码组件未加载';
+    }
+    el.qrFile.textContent = item.name;
+    el.qrUrl.value = url;
+    el.qrCopy.textContent = '复制';
+    el.qrModal.hidden = false;
+  }
+
+  function closeQrModal() {
+    if (!el.qrModal || el.qrModal.hidden) return;
+    el.qrModal.hidden = true;
+    el.qrCanvas.textContent = '';
+    state.qrItem = null;
+  }
+
+  // 删除只走服务端：R2 删除是幂等的，删完立刻让本地列表与用量重新拉一遍
+  function deleteCloudFile(item, btn) {
+    if (!item) return;
+    var ok = window.confirm('确定删除「' + item.name + '」？\n删除后链接立即失效，无法恢复。');
+    if (!ok) return;
+    if (btn) btn.disabled = true;
+    api('DELETE', '/api/files?key=' + encodeURIComponent(item.key)).then(
+      function () {
+        if (state.previewing && state.previewing.key === item.key) closePreview();
+        if (state.qrItem && state.qrItem.key === item.key) closeQrModal();
+        state.files = (state.files || []).filter(function (o) {
+          return o.key !== item.key;
+        });
+        state.filesAt = 0;
+        renderCloudFiles();
+        toast('已删除「' + item.name + '」');
+        loadCloudFiles(true);
+      },
+      function (err) {
+        if (btn) btn.disabled = false;
+        if (err && err.status === 401) return;
+        toast(err.message || '删除失败');
       },
     );
   }
@@ -2041,8 +2178,18 @@
     el.previewDownload.addEventListener('click', function () {
       downloadCloudFile(state.previewing, el.previewDownload);
     });
+    el.qrClose.addEventListener('click', closeQrModal);
+    el.qrMask.addEventListener('click', closeQrModal);
+    el.qrCopy.addEventListener('click', function () {
+      copyPlain(el.qrUrl.value, el.qrCopy);
+    });
     document.addEventListener('keydown', function (event) {
-      if (event.key === 'Escape') closePreview();
+      if (event.key !== 'Escape') return;
+      if (!el.qrModal.hidden) {
+        closeQrModal();
+        return;
+      }
+      closePreview();
     });
 
     el.messages.addEventListener('scroll', function () {

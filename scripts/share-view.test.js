@@ -14,6 +14,8 @@ const APP_JS = fs.readFileSync(path.join(PROJ, 'public/js/app.js'), 'utf8');
 const QR_JS = fs.readFileSync(path.join(PROJ, 'public/js/vendor/qrcode.js'), 'utf8');
 
 const PUBLIC_URL = 'https://files.frkang.top/s/abc123/%E6%8A%A5%E8%A1%A8.pdf';
+// 删除后让 mock 的列表真的少一条，才能验证「删完列表跟着变」
+const deletedKeys = new Set();
 let pass = 0;
 let fail = 0;
 
@@ -55,7 +57,8 @@ class FakeXHR {
 }
 FakeXHR.instances = [];
 
-function makeFetch(log) {
+function makeFetch(log, role) {
+  const meRole = role || 'admin';
   return function (url, opts) {
     const method = (opts && opts.method) || 'GET';
     const u = String(url);
@@ -64,7 +67,7 @@ function makeFetch(log) {
       data = { maxOnline: 20, allowRegister: false, fileUpload: true, maxFileMB: 100, retainFileDays: 7 };
     } else if (u.split('?')[0] === '/api/me') {
       data = {
-        me: { username: 'admin', deviceName: 'jsdom', displayName: 'admin', role: 'admin' },
+        me: { username: meRole === 'admin' ? 'admin' : 'bob', deviceName: 'jsdom', displayName: 'jsdom', role: meRole },
         online: 1,
         limits: { maxOnline: 20 },
       };
@@ -81,6 +84,9 @@ function makeFetch(log) {
       };
     } else if (u.indexOf('/api/files/download') === 0) {
       data = { url: 'https://r2.example/signed-get?x=1', name: '照片.png', size: 2097152, expiresIn: 300 };
+    } else if (u.split('?')[0] === '/api/files' && method === 'DELETE') {
+      deletedKeys.add(decodeURIComponent((u.split('key=')[1] || '')));
+      data = { ok: true, key: 's/a1/照片.png', name: '照片.png' };
     } else if (u.split('?')[0] === '/api/files') {
       data = {
         usage: {
@@ -113,7 +119,7 @@ function makeFetch(log) {
             scene: 'chat',
             url: 'https://files.frkang.top/c/b2/%E8%AF%B4%E6%98%8E.pdf',
           },
-        ],
+        ].filter((o) => !deletedKeys.has(o.key)),
         truncated: false,
         cached: false,
         fetchedAt: Date.now(),
@@ -149,7 +155,7 @@ class NoopEventSource {
   close() {}
 }
 
-async function boot(seedShares) {
+async function boot(seedShares, role) {
   // 下载成功后会赋值 location.href，jsdom 不支持真实导航，吞掉这条噪声
   const vc = new VirtualConsole();
   vc.on('jsdomError', () => {});
@@ -174,9 +180,10 @@ async function boot(seedShares) {
   win.localStorage.setItem('ai.username', 'admin');
   if (seedShares) win.localStorage.setItem('ai.shares', seedShares);
 
-  win.fetch = makeFetch(calls);
+  win.fetch = makeFetch(calls, role);
   win.EventSource = NoopEventSource;
   win.XMLHttpRequest = FakeXHR;
+  win.confirm = () => true; // 删除按钮用原生 confirm，jsdom 未实现会直接返回 false
   win.eval(QR_JS);
   win.eval(APP_JS);
   win.document.dispatchEvent(new win.Event('DOMContentLoaded'));
@@ -315,9 +322,17 @@ function dropFile(win, doc, name, type, size) {
   ok('文件行数 2', rows.length === 2, rows.length + ' 行');
   ok('图片行渲染缩略图', Boolean(rows[0].querySelector('.cf-thumb img')));
   ok(
-    '可预览类型提供查看',
-    rows[0].querySelectorAll('.cf-btns button').length === 3,
+    '每行按钮齐全（查看/下载/链接/二维码/删除）',
+    rows[0].querySelectorAll('.cf-btns button').length === 5,
     rows[0].querySelector('.cf-btns').textContent,
+  );
+  ok(
+    '二维码按钮有提示',
+    rows[0].querySelectorAll('.cf-btns button')[3].title === '扫码下载',
+  );
+  ok(
+    '删除按钮为危险色',
+    rows[0].querySelectorAll('.cf-btns button')[4].classList.contains('cf-danger'),
   );
   ok('名称与大小正确', rows[0].querySelector('.cf-name').textContent === '照片.png');
 
@@ -333,6 +348,46 @@ function dropFile(win, doc, name, type, size) {
   rows[1].querySelectorAll('.cf-btns button')[1].click();
   await sleep(120);
   ok('点击下载调用签名接口', E.calls.indexOf('GET /api/files/download') >= 0, E.calls.join(','));
+
+  /* ---------- 场景 8：扫码下载与删除 ---------- */
+  console.log('\n[8] 每行的二维码与删除');
+  const rowA = E.doc.querySelectorAll('#cf-list .cf-row')[0];
+  rowA.querySelectorAll('.cf-btns button')[3].click();
+  await sleep(60);
+  const qrModal = E.doc.getElementById('qr-modal');
+  ok('二维码弹层打开', qrModal.hidden === false);
+  ok('二维码已渲染', E.doc.getElementById('qr-canvas').innerHTML.indexOf('<svg') >= 0);
+  const qrUrl = E.doc.getElementById('qr-url').value;
+  ok(
+    '二维码指向扫码下载入口',
+    qrUrl.indexOf('/api/files/scan?key=') > 0 && qrUrl.indexOf(encodeURIComponent('s/a1/照片.png')) > 0,
+    qrUrl,
+  );
+  ok('弹层显示文件名', E.doc.getElementById('qr-file').textContent === '照片.png');
+  E.doc.getElementById('qr-close').click();
+  await sleep(30);
+  ok('二维码弹层关闭', qrModal.hidden === true);
+
+  const before = E.doc.querySelectorAll('#cf-list .cf-row').length;
+  E.doc.querySelectorAll('#cf-list .cf-row')[0].querySelectorAll('.cf-btns button')[4].click();
+  await sleep(200);
+  ok('删除走 DELETE 接口', E.calls.indexOf('DELETE /api/files') >= 0, E.calls.join(','));
+  ok(
+    '删除后列表少一条',
+    E.doc.querySelectorAll('#cf-list .cf-row').length === before - 1,
+    before + ' → ' + E.doc.querySelectorAll('#cf-list .cf-row').length,
+  );
+  ok('删除后有提示', E.doc.getElementById('toast').textContent.indexOf('已删除') === 0);
+
+  /* ---------- 场景 9：普通成员看不到云端文件 ---------- */
+  console.log('\n[9] 普通成员（无云端文件权限）');
+  const M = await boot(null, 'member');
+  nav(M.doc, 'files');
+  await sleep(80);
+  ok('上传区对成员可见', M.doc.getElementById('share-drop').hidden === false);
+  ok('云端文件区隐藏', M.doc.getElementById('cloud-files').hidden === true);
+  ok('空间用量卡片隐藏', M.doc.getElementById('usage-card').hidden === true);
+  ok('成员根本没请求列表接口', M.calls.indexOf('GET /api/files') < 0, M.calls.join(','));
 
   /* ---------- 汇总 ---------- */
   console.log('\n----------------------------------------');
