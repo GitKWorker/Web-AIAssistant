@@ -51,6 +51,12 @@
     shareHistory: null,
     // 上传中的 XHR 按场景隔离：聊天附件与发文件互不干扰
     uploadXhrs: { chat: null, share: null },
+    // 云端文件（R2 桶内实际对象）与空间占用
+    files: null,
+    filesUsage: null,
+    filesAt: 0,
+    filesLoading: false,
+    previewing: null,
   };
 
   var el = {};
@@ -134,6 +140,24 @@
     el.srQr = $('sr-qr');
     el.srAgain = $('sr-again');
     el.srOpen = $('sr-open');
+    el.usageCard = $('usage-card');
+    el.usageUsed = $('usage-used');
+    el.usageQuota = $('usage-quota');
+    el.usagePct = $('usage-pct');
+    el.usageFill = $('usage-fill');
+    el.usageSplit = $('usage-split');
+    el.filesRefresh = $('files-refresh');
+    el.cloudFiles = $('cloud-files');
+    el.cloudList = $('cf-list');
+    el.cloudSub = $('cf-sub');
+    el.cloudEmpty = $('cf-empty');
+    el.preview = $('preview');
+    el.previewMask = $('preview-mask');
+    el.previewName = $('preview-name');
+    el.previewBody = $('preview-body');
+    el.previewMeta = $('preview-meta');
+    el.previewClose = $('preview-close');
+    el.previewDownload = $('preview-download');
   }
 
   /* ---------------- 通用 ---------------- */
@@ -307,6 +331,10 @@
     if (el.navFiles) el.navFiles.hidden = !state.fileUpload;
     if (el.filesRetain) el.filesRetain.textContent = String(state.retainFileDays);
     if (el.shareHint) syncShareHint();
+    if (!state.fileUpload) {
+      if (el.usageCard) el.usageCard.hidden = true;
+      if (el.cloudFiles) el.cloudFiles.hidden = true;
+    }
   }
 
   function handleAuthSubmit(event) {
@@ -1120,6 +1148,8 @@
       syncShareHint();
     }
     renderShareHistory();
+    // 距离上次读取超过 15 秒就强制刷新，避免刚在聊天里发完附件这里看不到
+    loadCloudFiles(!state.filesAt || Date.now() - state.filesAt > 15000);
   }
 
   function shareHistoryKey() {
@@ -1281,6 +1311,8 @@
       .then(function (meta) {
         pushShareHistory(meta);
         renderShareResult(meta);
+        // 新对象已落到桶里，刷新用量与云端列表
+        loadCloudFiles(true);
       })
       .catch(function (err) {
         if (err && err.status === 401) return;
@@ -1320,6 +1352,239 @@
     } catch (err) {
       /* 二维码失败不影响链接使用 */
     }
+  }
+
+  /* ---------------- 云端文件（R2 桶内实际对象） ---------------- */
+
+  // 浏览器能直接渲染的类型；其余只提供下载（HTML/SVG 已在签名时降级为二进制）
+  var PREVIEW_BY_EXT = {
+    jpg: 'image', jpeg: 'image', png: 'image', gif: 'image', webp: 'image', bmp: 'image', avif: 'image',
+    mp4: 'video', webm: 'video', mov: 'video', m4v: 'video',
+    mp3: 'audio', wav: 'audio', ogg: 'audio', m4a: 'audio', flac: 'audio', aac: 'audio',
+    pdf: 'iframe',
+    txt: 'iframe', log: 'iframe', md: 'iframe', json: 'iframe', csv: 'iframe',
+  };
+
+  function previewKind(name) {
+    var m = /\.([A-Za-z0-9]{1,6})$/.exec(String(name || ''));
+    if (!m) return '';
+    return PREVIEW_BY_EXT[m[1].toLowerCase()] || '';
+  }
+
+  function fmtTime(ts) {
+    var n = Number(ts);
+    if (!isFinite(n) || n <= 0) return '—';
+    var d = new Date(n);
+    return (
+      ('0' + (d.getMonth() + 1)).slice(-2) +
+      '-' +
+      ('0' + d.getDate()).slice(-2) +
+      ' ' +
+      ('0' + d.getHours()).slice(-2) +
+      ':' +
+      ('0' + d.getMinutes()).slice(-2)
+    );
+  }
+
+  function renderUsage(usage) {
+    if (!usage) {
+      el.usageCard.hidden = true;
+      return;
+    }
+    el.usageCard.hidden = false;
+    el.usageUsed.textContent = fmtSize(usage.bytes);
+    el.usageQuota.textContent = '/ ' + fmtSize(usage.quotaBytes) + ' 免费额度';
+    el.usagePct.textContent = usage.percent + '%';
+    var width = Math.max(0, Math.min(100, Number(usage.percent) || 0));
+    el.usageFill.style.width = (width > 0 && width < 1 ? 1 : width) + '%';
+    el.usageFill.classList.toggle('is-warn', width >= 80);
+
+    var chat = (usage.byScene && usage.byScene.chat) || { count: 0, bytes: 0 };
+    var share = (usage.byScene && usage.byScene.share) || { count: 0, bytes: 0 };
+    var other = (usage.byScene && usage.byScene.other) || { count: 0, bytes: 0 };
+    var parts = [
+      '聊天附件 ' + chat.count + ' 个 · ' + fmtSize(chat.bytes),
+      '分享 ' + share.count + ' 个 · ' + fmtSize(share.bytes),
+    ];
+    if (other.count) parts.push('其他 ' + other.count + ' 个 · ' + fmtSize(other.bytes));
+    el.usageSplit.textContent = parts.join('　·　');
+  }
+
+  function renderCloudFiles() {
+    var items = state.files || [];
+    var shown = items.slice(0, 100);
+    el.cloudFiles.hidden = false;
+    el.cloudList.textContent = '';
+    el.cloudEmpty.hidden = items.length > 0;
+    el.cloudSub.textContent = items.length
+      ? '共 ' + items.length + ' 个' + (items.length > shown.length ? '，显示最近 ' + shown.length + ' 个' : '')
+      : '';
+
+    shown.forEach(function (item) {
+      var expired = item.expireAt && Date.now() > item.expireAt;
+      var kind = previewKind(item.name);
+      var row = document.createElement('div');
+      row.className = 'cf-row' + (expired ? ' is-expired' : '');
+
+      var thumb = document.createElement('div');
+      thumb.className = 'cf-thumb';
+      if (kind === 'image') {
+        var img = document.createElement('img');
+        img.src = item.url;
+        img.alt = '';
+        img.loading = 'lazy';
+        thumb.appendChild(img);
+      } else {
+        thumb.textContent = fileExt(item.name);
+      }
+
+      var meta = document.createElement('div');
+      meta.className = 'cf-meta';
+      var name = document.createElement('div');
+      name.className = 'cf-name';
+      name.textContent = item.name;
+      name.title = item.name;
+      var sub = document.createElement('div');
+      sub.className = 'cf-sub2';
+      sub.textContent =
+        fmtSize(item.size) +
+        ' · ' +
+        fmtTime(item.createdAt) +
+        ' · ' +
+        (expired ? '已过期，待清理' : expireText(item.expireAt));
+      meta.appendChild(name);
+      meta.appendChild(sub);
+
+      var btns = document.createElement('div');
+      btns.className = 'cf-btns';
+
+      if (kind) {
+        var view = document.createElement('button');
+        view.type = 'button';
+        view.className = 'btn-ghost btn-sm';
+        view.textContent = '查看';
+        view.addEventListener('click', function () {
+          openPreview(item);
+        });
+        btns.appendChild(view);
+      }
+
+      var dl = document.createElement('button');
+      dl.type = 'button';
+      dl.className = 'btn-ghost btn-sm';
+      dl.textContent = '下载';
+      dl.addEventListener('click', function () {
+        downloadCloudFile(item, dl);
+      });
+      btns.appendChild(dl);
+
+      var link = document.createElement('button');
+      link.type = 'button';
+      link.className = 'btn-ghost btn-sm cf-copy';
+      link.textContent = '链接';
+      link.title = '复制公开链接';
+      link.addEventListener('click', function () {
+        copyPlain(item.url, link);
+      });
+      btns.appendChild(link);
+
+      row.appendChild(thumb);
+      row.appendChild(meta);
+      row.appendChild(btns);
+      el.cloudList.appendChild(row);
+    });
+  }
+
+  function loadCloudFiles(force) {
+    if (!state.fileUpload || state.filesLoading) return;
+    state.filesLoading = true;
+    el.filesRefresh.disabled = true;
+
+    api('GET', '/api/files' + (force ? '?refresh=1' : '')).then(
+      function (data) {
+        state.filesLoading = false;
+        el.filesRefresh.disabled = false;
+        state.filesAt = Date.now();
+        state.files = (data && data.objects) || [];
+        state.filesUsage = (data && data.usage) || null;
+        renderUsage(state.filesUsage);
+        renderCloudFiles();
+      },
+      function (err) {
+        state.filesLoading = false;
+        el.filesRefresh.disabled = false;
+        if (err && err.status === 401) return;
+        el.usageCard.hidden = true;
+        el.cloudFiles.hidden = true;
+        toast(err.message || '读取文件列表失败');
+      },
+    );
+  }
+
+  function openPreview(item) {
+    var kind = previewKind(item.name);
+    if (!kind) return;
+    state.previewing = item;
+    el.previewName.textContent = item.name;
+    el.previewName.title = item.name;
+    el.previewMeta.textContent = fmtSize(item.size) + ' · ' + fmtTime(item.createdAt);
+    el.previewBody.textContent = '';
+
+    var node;
+    if (kind === 'image') {
+      node = document.createElement('img');
+      node.alt = item.name;
+      node.src = item.url;
+    } else if (kind === 'video') {
+      node = document.createElement('video');
+      node.controls = true;
+      node.src = item.url;
+    } else if (kind === 'audio') {
+      node = document.createElement('audio');
+      node.controls = true;
+      node.src = item.url;
+    } else {
+      node = document.createElement('iframe');
+      node.title = item.name;
+      node.src = item.url;
+    }
+    el.previewBody.appendChild(node);
+    el.preview.hidden = false;
+  }
+
+  function closePreview() {
+    if (el.preview.hidden) return;
+    el.preview.hidden = true;
+    el.previewBody.textContent = ''; // 同时停掉视频/音频播放
+    state.previewing = null;
+  }
+
+  // 下载走服务端签发的 5 分钟链接：public URL 上图片/PDF 是内联预览，
+  // 只有带 response-content-disposition 的签名链接才会直接另存为原文件名。
+  function downloadCloudFile(item, btn) {
+    if (!item) return;
+    var label = btn ? btn.textContent : '';
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = '准备…';
+    }
+    var restore = function () {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = label;
+      }
+    };
+    api('GET', '/api/files/download?key=' + encodeURIComponent(item.key)).then(
+      function (res) {
+        restore();
+        if (res && res.url) window.location.href = res.url;
+      },
+      function (err) {
+        restore();
+        if (err && err.status === 401) return;
+        toast(err.message || '下载失败');
+      },
+    );
   }
 
   /* ---------------- 设置 ---------------- */
@@ -1765,6 +2030,19 @@
 
     el.srCopy.addEventListener('click', function () {
       copyPlain(el.srUrl.value, el.srCopy);
+    });
+
+    el.filesRefresh.addEventListener('click', function () {
+      loadCloudFiles(true);
+    });
+
+    el.previewClose.addEventListener('click', closePreview);
+    el.previewMask.addEventListener('click', closePreview);
+    el.previewDownload.addEventListener('click', function () {
+      downloadCloudFile(state.previewing, el.previewDownload);
+    });
+    document.addEventListener('keydown', function (event) {
+      if (event.key === 'Escape') closePreview();
     });
 
     el.messages.addEventListener('scroll', function () {

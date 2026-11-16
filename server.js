@@ -547,6 +547,9 @@ async function handleFileSign(req, res, session) {
     return fail(res, 500, 'SIGN_FAILED', '签发上传许可失败');
   }
 
+  // 有新文件要进来，让列表缓存失效，避免别人 15 秒内看不到
+  fileListCache = { at: 0, data: null };
+
   return sendJson(res, 200, {
     uploadUrl: signed.uploadUrl,
     publicUrl: signed.publicUrl,
@@ -558,6 +561,107 @@ async function handleFileSign(req, res, session) {
     expireAt: Date.now() + RETAIN_DAYS * 24 * 60 * 60 * 1000,
     retainDays: RETAIN_DAYS,
   });
+}
+
+// 桶内对象列表 + 空间占用。列表有 15 秒缓存：翻页属于 Class A 操作，
+// 多人同时打开页面时不该每次都去敲 R2。
+let fileListCache = { at: 0, data: null };
+
+function summarizeUsage(objects) {
+  const quotaBytes = r2.FREE_QUOTA_BYTES;
+  const bytes = objects.reduce((sum, o) => sum + (Number(o.size) || 0), 0);
+  const byScene = {
+    chat: { count: 0, bytes: 0 },
+    share: { count: 0, bytes: 0 },
+    other: { count: 0, bytes: 0 },
+  };
+  for (const o of objects) {
+    const bucket = byScene[o.scene] || byScene.other;
+    bucket.count += 1;
+    bucket.bytes += Number(o.size) || 0;
+  }
+  return {
+    count: objects.length,
+    bytes,
+    quotaBytes,
+    percent: quotaBytes ? Number(((bytes / quotaBytes) * 100).toFixed(2)) : 0,
+    byScene,
+  };
+}
+
+async function collectFiles(force) {
+  if (!force && fileListCache.data && Date.now() - fileListCache.at < r2.LIST_CACHE_MS) {
+    return Object.assign({}, fileListCache.data, { cached: true });
+  }
+  const { objects, truncated } = await r2.listObjects();
+  const data = {
+    objects,
+    truncated,
+    usage: summarizeUsage(objects),
+    fetchedAt: Date.now(),
+    cached: false,
+  };
+  fileListCache = { at: Date.now(), data };
+  return data;
+}
+
+async function handleFileList(req, res, url) {
+  if (!r2.isConfigured()) {
+    return fail(res, 503, 'FILE_UPLOAD_DISABLED', '文件功能未启用');
+  }
+  const force = url.searchParams.get('refresh') === '1';
+  try {
+    const payload = await collectFiles(force);
+    return sendJson(res, 200, payload);
+  } catch (err) {
+    console.error('[files] 列表读取失败：', err.message);
+    const msg = /^LIST_FAILED_403/.test(err.message)
+      ? 'API 令牌没有读取对象的权限'
+      : '读取文件列表失败';
+    return fail(res, 502, 'LIST_FAILED', msg);
+  }
+}
+
+// 签发下载链接：302 不适合前端带自定义头，所以返回 JSON 由前端跳转。
+// 链接 5 分钟有效，附带 attachment 头，图片/PDF 也会直接另存而不是在新标签打开。
+async function handleFileDownload(req, res, url) {
+  if (!r2.isConfigured()) {
+    return fail(res, 503, 'FILE_UPLOAD_DISABLED', '文件功能未启用');
+  }
+  const key = String(url.searchParams.get('key') || '').trim();
+  if (!key || key.length > 400 || key.indexOf('..') >= 0 || !/^[^/]+\/[^/]+\//.test(key)) {
+    return fail(res, 400, 'INVALID_KEY', '文件标识无效');
+  }
+
+  let target = null;
+  try {
+    const payload = await collectFiles(false);
+    target = payload.objects.find((o) => o.key === key) || null;
+    if (!target) {
+      // 缓存可能落后于真实状态（刚上传 / 刚被生命周期删除），强制刷一次
+      const fresh = await collectFiles(true);
+      target = fresh.objects.find((o) => o.key === key) || null;
+    }
+  } catch (err) {
+    console.error('[files] 下载前校验失败：', err.message);
+    return fail(res, 502, 'LIST_FAILED', '读取文件信息失败');
+  }
+  if (!target) {
+    return fail(res, 404, 'NOT_FOUND', '文件不存在或已过期清理');
+  }
+
+  try {
+    const signed = r2.presignGet(key, { expiresIn: 300, downloadName: target.name });
+    return sendJson(res, 200, {
+      url: signed.url,
+      name: target.name,
+      size: target.size,
+      expiresIn: signed.expiresIn,
+    });
+  } catch (err) {
+    console.error('[files] 下载签名失败：', err.message);
+    return fail(res, 500, 'SIGN_FAILED', '签发下载链接失败');
+  }
 }
 
 // 校验前端回传的文件元数据：只接受我们自己签出的 key 前缀，且 URL 必须落在公开域上，
@@ -729,6 +833,18 @@ async function handleApi(req, res, url) {
     const session = requireSession(req, res);
     if (!session) return undefined;
     return handleFileSign(req, res, session);
+  }
+
+  if (route === 'GET /api/files') {
+    const session = requireSession(req, res);
+    if (!session) return undefined;
+    return handleFileList(req, res, url);
+  }
+
+  if (route === 'GET /api/files/download') {
+    const session = requireSession(req, res);
+    if (!session) return undefined;
+    return handleFileDownload(req, res, url);
   }
 
   if (route === 'GET /api/messages' || route === 'POST /api/messages') {

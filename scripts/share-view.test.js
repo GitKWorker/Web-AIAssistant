@@ -2,11 +2,11 @@
 /* 发文件页状态保留 —— jsdom DOM 级回归测试
  * 依赖：npm i -D jsdom（仅本地测试用，运行镜像不含此依赖）
  * 运行：node scripts/share-view.test.js
- * 覆盖：上传后切页返回、刷新后恢复、历史列表、上传 XHR 场景隔离
+ * 覆盖：上传后切页返回、刷新后恢复、历史列表、上传 XHR 场景隔离、云端文件列表与用量
  */
 const fs = require('fs');
 const path = require('path');
-const { JSDOM } = require('jsdom');
+const { JSDOM, VirtualConsole } = require('jsdom');
 
 const PROJ = path.resolve(__dirname, '..');
 const HTML = fs.readFileSync(path.join(PROJ, 'public/index.html'), 'utf8');
@@ -79,6 +79,45 @@ function makeFetch(log) {
         publicUrl: PUBLIC_URL,
         expireAt: Date.now() + 7 * 86400000,
       };
+    } else if (u.indexOf('/api/files/download') === 0) {
+      data = { url: 'https://r2.example/signed-get?x=1', name: '照片.png', size: 2097152, expiresIn: 300 };
+    } else if (u.split('?')[0] === '/api/files') {
+      data = {
+        usage: {
+          count: 2,
+          bytes: 3145728,
+          quotaBytes: 10737418240,
+          percent: 0.03,
+          byScene: {
+            chat: { count: 1, bytes: 1048576 },
+            share: { count: 1, bytes: 2097152 },
+            other: { count: 0, bytes: 0 },
+          },
+        },
+        objects: [
+          {
+            key: 's/a1/照片.png',
+            name: '照片.png',
+            size: 2097152,
+            createdAt: Date.now() - 3600000,
+            expireAt: Date.now() + 6 * 86400000,
+            scene: 'share',
+            url: 'https://files.frkang.top/s/a1/%E7%85%A7%E7%89%87.png',
+          },
+          {
+            key: 'c/b2/说明.pdf',
+            name: '说明.pdf',
+            size: 1048576,
+            createdAt: Date.now() - 7200000,
+            expireAt: Date.now() + 6 * 86400000,
+            scene: 'chat',
+            url: 'https://files.frkang.top/c/b2/%E8%AF%B4%E6%98%8E.pdf',
+          },
+        ],
+        truncated: false,
+        cached: false,
+        fetchedAt: Date.now(),
+      };
     } else if (u.indexOf('/api/messages') === 0 && method === 'POST') {
       const body = JSON.parse((opts && opts.body) || '{}');
       data = {
@@ -111,10 +150,15 @@ class NoopEventSource {
 }
 
 async function boot(seedShares) {
+  // 下载成功后会赋值 location.href，jsdom 不支持真实导航，吞掉这条噪声
+  const vc = new VirtualConsole();
+  vc.on('jsdomError', () => {});
+
   const dom = new JSDOM(HTML, {
     url: 'http://127.0.0.1:3080/',
     runScripts: 'outside-only',
     pretendToBeVisual: true,
+    virtualConsole: vc,
   });
   const win = dom.window;
 
@@ -242,6 +286,53 @@ function dropFile(win, doc, name, type, size) {
   ok('过期记录不提供复制', !rowD.querySelector('.sh-copy'));
   ok('过期记录只给移除', Boolean(rowD.querySelector('.sh-del')));
   ok('过期状态文案', rowD.querySelector('.sh-sub').textContent.indexOf('已过期') >= 0, rowD.querySelector('.sh-sub').textContent);
+
+  /* ---------- 场景 7：云端文件列表与空间用量 ---------- */
+  console.log('\n[7] 云端文件列表、预览与下载');
+  const E = await boot(null);
+  nav(E.doc, 'files');
+  await sleep(200);
+
+  ok('用量卡片显示', E.doc.getElementById('usage-card').hidden === false);
+  ok(
+    '已用空间',
+    E.doc.getElementById('usage-used').textContent === '3.0 MB',
+    E.doc.getElementById('usage-used').textContent,
+  );
+  ok(
+    '占比与配额',
+    E.doc.getElementById('usage-pct').textContent === '0.03%' &&
+      E.doc.getElementById('usage-quota').textContent.indexOf('10.00 GB') >= 0,
+    E.doc.getElementById('usage-pct').textContent,
+  );
+  ok(
+    '分类明细含聊天与分享',
+    E.doc.getElementById('usage-split').textContent.indexOf('聊天附件 1 个') >= 0 &&
+      E.doc.getElementById('usage-split').textContent.indexOf('分享 1 个') >= 0,
+  );
+
+  const rows = E.doc.querySelectorAll('#cf-list .cf-row');
+  ok('文件行数 2', rows.length === 2, rows.length + ' 行');
+  ok('图片行渲染缩略图', Boolean(rows[0].querySelector('.cf-thumb img')));
+  ok(
+    '可预览类型提供查看',
+    rows[0].querySelectorAll('.cf-btns button').length === 3,
+    rows[0].querySelector('.cf-btns').textContent,
+  );
+  ok('名称与大小正确', rows[0].querySelector('.cf-name').textContent === '照片.png');
+
+  rows[0].querySelectorAll('.cf-btns button')[0].click();
+  await sleep(40);
+  const pv = E.doc.getElementById('preview');
+  ok('点击查看打开预览层', pv.hidden === false);
+  ok('预览内容为 img', Boolean(E.doc.querySelector('#preview-body img')));
+  E.doc.getElementById('preview-close').click();
+  await sleep(30);
+  ok('关闭预览', pv.hidden === true);
+
+  rows[1].querySelectorAll('.cf-btns button')[1].click();
+  await sleep(120);
+  ok('点击下载调用签名接口', E.calls.indexOf('GET /api/files/download') >= 0, E.calls.join(','));
 
   /* ---------- 汇总 ---------- */
   console.log('\n----------------------------------------');
