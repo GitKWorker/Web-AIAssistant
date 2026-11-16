@@ -858,6 +858,58 @@ input:focus, select:focus, textarea:focus {
 
 .sr-foot { display: flex; gap: 8px; margin-top: 14px; }
 
+/* 最近分享（本地记录，刷新后仍在） */
+
+.share-history {
+  padding: 12px 14px;
+  border: 0.5px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface-2);
+}
+.sh-title {
+  font-size: 11.5px;
+  color: var(--text-3);
+  letter-spacing: 0.04em;
+  margin-bottom: 8px;
+}
+.sh-list { display: flex; flex-direction: column; gap: 2px; }
+.sh-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 4px;
+  border-radius: var(--radius-sm);
+}
+.sh-row + .sh-row { border-top: 0.5px solid var(--line); }
+.sh-row:hover { background: var(--surface-3); }
+.sh-icon {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 8px;
+  font-weight: 500;
+}
+.sh-meta { flex: 1; min-width: 0; }
+.sh-name {
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sh-sub { font-size: 11px; color: var(--text-3); }
+.sh-btns { flex: 0 0 auto; display: flex; align-items: center; gap: 4px; }
+.sh-btns .btn-ghost { color: var(--text-3); }
+.sh-btns .btn-ghost:hover { color: var(--accent); }
+.sh-row.is-expired .sh-icon { background: var(--surface-3); color: var(--text-3); }
+.sh-row.is-expired .sh-name { color: var(--text-3); text-decoration: line-through; }
+.sh-row.is-expired .sh-sub { color: var(--danger); }
+
 .btn-sm {
   height: 28px;
   padding: 0 10px;

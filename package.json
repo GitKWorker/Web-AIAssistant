@@ -1,11 +1,15 @@
 {
   "name": "ai-assistant",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "private": true,
-  "description": "AI 助手 · 轻量团队消息同步工具（纯 HTTP，零依赖）",
+  "description": "AI 助手 · 轻量团队消息同步工具（纯 HTTP，零运行时依赖）",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test:share": "node scripts/share-view.test.js"
+  },
+  "devDependencies": {
+    "jsdom": "^31.0.1"
   },
   "engines": {
     "node": ">=18"

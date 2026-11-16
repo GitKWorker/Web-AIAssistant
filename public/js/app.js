@@ -11,7 +11,11 @@
     device: 'ai.deviceName',
     session: 'ai.sessionId',
     limit: 'ai.displayLimit',
+    shares: 'ai.shares',
   };
+
+  // 「最近分享」本地保留条数
+  var SHARE_HISTORY_MAX = 10;
 
   var COPY_ICON =
     '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 3.5v-.5a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h.5"/></svg>';
@@ -42,7 +46,11 @@
     fileUpload: false,
     maxFileMB: 100,
     retainFileDays: 7,
-    shareTask: null,
+    // 发文件页：当前结果与本地历史（null 表示尚未从 localStorage 载入）
+    lastShare: null,
+    shareHistory: null,
+    // 上传中的 XHR 按场景隔离：聊天附件与发文件互不干扰
+    uploadXhrs: { chat: null, share: null },
   };
 
   var el = {};
@@ -116,6 +124,8 @@
     el.spMeta = $('sp-meta');
     el.spCancel = $('sp-cancel');
     el.shareResult = $('share-result');
+    el.shareHistory = $('share-history');
+    el.shareHistoryList = $('sh-list');
     el.srIcon = $('sr-icon');
     el.srName = $('sr-name');
     el.srSub = $('sr-sub');
@@ -296,12 +306,7 @@
     if (el.attach) el.attach.hidden = !state.fileUpload;
     if (el.navFiles) el.navFiles.hidden = !state.fileUpload;
     if (el.filesRetain) el.filesRetain.textContent = String(state.retainFileDays);
-    if (el.shareHint) {
-      el.shareHint.textContent = state.fileUpload
-        ? '单个文件最大 ' + state.maxFileMB + ' MB · 文件保存 ' + state.retainFileDays + ' 天'
-        : '文件功能未配置，请联系管理员填写 R2 凭据';
-    }
-    if (el.shareDrop) el.shareDrop.classList.toggle('is-disabled', !state.fileUpload);
+    if (el.shareHint) syncShareHint();
   }
 
   function handleAuthSubmit(event) {
@@ -843,7 +848,8 @@
     }).then(function (ticket) {
       return new Promise(function (resolve, reject) {
         var xhr = new XMLHttpRequest();
-        state.uploadXhr = xhr;
+        // 按场景登记，避免一处取消/重置误杀另一处正在进行的上传
+        state.uploadXhrs[scene] = xhr;
         xhr.open('PUT', ticket.uploadUrl, true);
         xhr.setRequestHeader('Content-Type', ticket.contentType);
         xhr.upload.onprogress = function (event) {
@@ -852,7 +858,7 @@
           }
         };
         xhr.onload = function () {
-          state.uploadXhr = null;
+          state.uploadXhrs[scene] = null;
           if (xhr.status >= 200 && xhr.status < 300) {
             resolve({
               key: ticket.key,
@@ -869,11 +875,11 @@
           }
         };
         xhr.onerror = function () {
-          state.uploadXhr = null;
+          state.uploadXhrs[scene] = null;
           reject(new Error('网络中断，上传失败'));
         };
         xhr.onabort = function () {
-          state.uploadXhr = null;
+          state.uploadXhrs[scene] = null;
           reject(new Error('已取消上传'));
         };
         if (typeof onProgress === 'function') onProgress(0);
@@ -1066,15 +1072,24 @@
 
   /* ---------------- 发文件（独立分享） ---------------- */
 
+  function syncShareHint() {
+    el.shareHint.textContent = state.fileUpload
+      ? '单个文件最大 ' + state.maxFileMB + ' MB · 文件保存 ' + state.retainFileDays + ' 天'
+      : '文件功能未配置，请联系管理员填写 R2 凭据';
+    el.shareDrop.classList.toggle('is-disabled', !state.fileUpload);
+  }
+
+  // 「再传一个」：只清当前结果，不动本地历史
   function resetShare() {
-    if (state.uploadXhr) {
+    if (state.uploadXhrs.share) {
       try {
-        state.uploadXhr.abort();
+        state.uploadXhrs.share.abort();
       } catch (err) {
         /* 忽略 */
       }
-      state.uploadXhr = null;
+      state.uploadXhrs.share = null;
     }
+    state.lastShare = null;
     el.shareDrop.hidden = false;
     el.shareProgress.hidden = true;
     el.shareResult.hidden = true;
@@ -1082,10 +1097,156 @@
     el.spFill.style.width = '0%';
     el.spPct.textContent = '0%';
     el.srQr.textContent = '';
-    el.shareHint.textContent = state.fileUpload
-      ? '单个文件最大 ' + state.maxFileMB + ' MB · 文件保存 ' + state.retainFileDays + ' 天'
-      : '文件功能未配置，请联系管理员填写 R2 凭据';
-    el.shareDrop.classList.toggle('is-disabled', !state.fileUpload);
+    syncShareHint();
+    renderShareHistory();
+  }
+
+  // 进入发文件页：恢复上次结果，而不是清空
+  function enterFilesView() {
+    if (state.shareHistory === null) loadShareHistory();
+    var busy = Boolean(state.uploadXhrs.share);
+    if (busy) {
+      // 上传仍在进行：保留进度条，不要重置
+      el.shareDrop.hidden = true;
+      el.shareResult.hidden = true;
+      el.shareProgress.hidden = false;
+    } else if (state.lastShare) {
+      renderShareResult(state.lastShare);
+    } else {
+      el.shareDrop.hidden = false;
+      el.shareResult.hidden = true;
+      el.shareProgress.hidden = true;
+      el.srQr.textContent = '';
+      syncShareHint();
+    }
+    renderShareHistory();
+  }
+
+  function shareHistoryKey() {
+    return STORAGE.shares;
+  }
+
+  function loadShareHistory() {
+    state.shareHistory = [];
+    try {
+      var raw = localStorage.getItem(shareHistoryKey());
+      if (raw) {
+        var parsed = JSON.parse(raw);
+        if (Object.prototype.toString.call(parsed) === '[object Array]') {
+          state.shareHistory = parsed
+            .filter(function (item) {
+              return item && typeof item.url === 'string' && typeof item.name === 'string';
+            })
+            .slice(0, SHARE_HISTORY_MAX);
+        }
+      }
+    } catch (err) {
+      state.shareHistory = [];
+    }
+    // 刷新后仍能显示上次生成的链接
+    state.lastShare = state.shareHistory.length ? state.shareHistory[0] : null;
+  }
+
+  function saveShareHistory() {
+    try {
+      localStorage.setItem(shareHistoryKey(), JSON.stringify(state.shareHistory || []));
+    } catch (err) {
+      /* 隐私模式或配额满时忽略，不影响上传本身 */
+    }
+  }
+
+  function pushShareHistory(meta) {
+    if (state.shareHistory === null) loadShareHistory();
+    var list = state.shareHistory.filter(function (item) {
+      return item.url !== meta.url;
+    });
+    list.unshift({
+      key: meta.key,
+      name: meta.name,
+      size: meta.size,
+      mime: meta.mime,
+      url: meta.url,
+      expireAt: meta.expireAt,
+      by: state.me ? state.me.username : '',
+      at: Date.now(),
+    });
+    state.shareHistory = list.slice(0, SHARE_HISTORY_MAX);
+    state.lastShare = meta;
+    saveShareHistory();
+    renderShareHistory();
+  }
+
+  function removeShareHistory(url) {
+    state.shareHistory = (state.shareHistory || []).filter(function (item) {
+      return item.url !== url;
+    });
+    if (state.lastShare && state.lastShare.url === url) {
+      state.lastShare = state.shareHistory.length ? state.shareHistory[0] : null;
+    }
+    saveShareHistory();
+    renderShareHistory();
+  }
+
+  function renderShareHistory() {
+    if (!el.shareHistoryList) return;
+    var items = state.shareHistory || [];
+    el.shareHistoryList.textContent = '';
+    el.shareHistory.hidden = !items.length;
+
+    items.forEach(function (item) {
+      var expired = Date.now() > Number(item.expireAt);
+      var row = document.createElement('div');
+      row.className = 'sh-row' + (expired ? ' is-expired' : '');
+
+      var icon = document.createElement('span');
+      icon.className = 'sh-icon';
+      icon.textContent = fileExt(item.name);
+
+      var meta = document.createElement('div');
+      meta.className = 'sh-meta';
+      var name = document.createElement('div');
+      name.className = 'sh-name';
+      name.textContent = item.name;
+      name.title = item.name;
+      var sub = document.createElement('div');
+      sub.className = 'sh-sub';
+      sub.textContent = fmtSize(item.size) + ' · ' + expireText(item.expireAt);
+      meta.appendChild(name);
+      meta.appendChild(sub);
+
+      var btns = document.createElement('div');
+      btns.className = 'sh-btns';
+
+      if (!expired) {
+        var copy = document.createElement('button');
+        copy.type = 'button';
+        copy.className = 'btn-ghost btn-sm sh-copy';
+        copy.textContent = '复制';
+        copy.dataset.url = item.url;
+        btns.appendChild(copy);
+
+        var open = document.createElement('a');
+        open.className = 'btn-ghost btn-sm';
+        open.href = item.url;
+        open.target = '_blank';
+        open.rel = 'noopener';
+        open.textContent = '打开';
+        btns.appendChild(open);
+      }
+
+      var del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'btn-ghost btn-sm sh-del';
+      del.textContent = expired ? '移除' : '×';
+      del.title = '从列表移除（不影响已上传的文件）';
+      del.dataset.url = item.url;
+      btns.appendChild(del);
+
+      row.appendChild(icon);
+      row.appendChild(meta);
+      row.appendChild(btns);
+      el.shareHistoryList.appendChild(row);
+    });
   }
 
   function startShareUpload(file) {
@@ -1117,16 +1278,22 @@
         el.spMeta.textContent = fmtSize(file.size) + ' · 生成链接…';
       }
     })
-      .then(renderShareResult)
+      .then(function (meta) {
+        pushShareHistory(meta);
+        renderShareResult(meta);
+      })
       .catch(function (err) {
         if (err && err.status === 401) return;
         el.shareProgress.hidden = true;
         el.shareDrop.hidden = false;
+        syncShareHint();
+        renderShareHistory();
         toast(err.message || '上传失败');
       });
   }
 
   function renderShareResult(meta) {
+    if (meta) state.lastShare = meta;
     el.shareProgress.hidden = true;
     el.shareDrop.hidden = true;
     el.shareResult.hidden = false;
@@ -1172,7 +1339,7 @@
     if (view === 'settings') {
       fillSettings();
     } else if (view === 'files') {
-      resetShare();
+      enterFilesView();
     } else {
       el.input.focus();
     }
@@ -1573,12 +1740,24 @@
     });
 
     el.spCancel.addEventListener('click', function () {
-      if (state.uploadXhr) {
+      if (state.uploadXhrs.share) {
         try {
-          state.uploadXhr.abort();
+          state.uploadXhrs.share.abort();
         } catch (err) {
           /* 忽略 */
         }
+      }
+    });
+
+    el.shareHistoryList.addEventListener('click', function (event) {
+      var target = event.target;
+      if (!target || !target.dataset) return;
+      var url = target.dataset.url;
+      if (!url) return;
+      if (target.classList.contains('sh-copy')) {
+        copyPlain(url, target);
+      } else if (target.classList.contains('sh-del')) {
+        removeShareHistory(url);
       }
     });
 
