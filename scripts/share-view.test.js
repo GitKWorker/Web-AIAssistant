@@ -179,6 +179,9 @@ function makeFetch(log, role) {
       (log.signFolders = log.signFolders || []).push(reqBody.folder || '');
     } else if (u.indexOf('/api/files/download') === 0) {
       data = { url: 'https://r2.example/signed-get?x=1', name: '照片.png', size: 2097152, expiresIn: 300 };
+    } else if (u.indexOf('/api/peer/relay') === 0) {
+      (log.relayCalls = log.relayCalls || []).push(method + ' ' + u.split('?')[0]);
+      data = { ok: true, tid: 'tid-test-1', received: 0 };
     } else if (u.split('?')[0] === '/api/files/folder' && method === 'POST') {
       const body = JSON.parse((opts && opts.body) || '{}');
       (log.folderCreates = log.folderCreates || []).push(body);
@@ -746,13 +749,15 @@ function dropFile(win, doc, name, type, size) {
   peerChip.click();
   await sleep(40);
   const binFile = new A.win.File(['hello-transfer'], '直传测试.bin', { type: 'application/octet-stream' });
-  Object.defineProperty(A.doc.getElementById('send-file'), 'files', { value: [binFile] });
+  Object.defineProperty(A.doc.getElementById('send-file'), 'files', { value: [binFile], configurable: true });
   A.doc.getElementById('send-file').dispatchEvent(new A.win.Event('change'));
   await sleep(60);
   const sendOk = A.doc.getElementById('send-ok');
-  ok('无 WebRTC 时提示云盘中转', sendOk.hidden === false && sendOk.textContent === '同意中转');
+  const relayBtns = Array.from(A.doc.getElementById('send-body').querySelectorAll('button'));
+  ok('无 WebRTC 时出现服务器/云盘中转双按钮', Boolean(relayBtns.find((b) => b.textContent === '服务器中转')) && Boolean(relayBtns.find((b) => b.textContent === '云盘中转')) && sendOk.hidden === true);
   ok('中转说明出现', A.doc.getElementById('send-body').textContent.indexOf('云盘中转') >= 0);
-  sendOk.click();
+  const cloudBtn = relayBtns.find((b) => b.textContent === '云盘中转');
+  cloudBtn.click();
   await sleep(60);
   const putXhr = FakeXHR.instances[FakeXHR.instances.length - 1];
   ok('中转走对象存储上传（PUT）', putXhr && putXhr.method === 'PUT');
@@ -764,6 +769,24 @@ function dropFile(win, doc, name, type, size) {
   ok('私发消息渲染私发标记', Boolean(A.doc.querySelector('#messages .msg-private')));
   const badge = A.doc.querySelector('#messages .msg-private');
   ok('标记指明收件人', badge && badge.textContent === '私发·李雷', badge && badge.textContent);
+
+  /* ---------- 场景 15：直传不可用 → 服务器中转发起流程 ---------- */
+  console.log('\n[15] 直传不可用 → 服务器中转 → 发起请求带目标设备');
+  peerChip.click();
+  await sleep(40);
+  const binFile2 = new A.win.File(['hello-relay'], '中转测试.bin', { type: 'application/octet-stream' });
+  Object.defineProperty(A.doc.getElementById('send-file'), 'files', { value: [binFile2], configurable: true });
+  A.doc.getElementById('send-file').dispatchEvent(new A.win.Event('change'));
+  await sleep(60);
+  const relayBtns2 = Array.from(A.doc.getElementById('send-body').querySelectorAll('button'));
+  const serverBtn2 = relayBtns2.find((b) => b.textContent === '服务器中转');
+  ok('服务器中转按钮存在', Boolean(serverBtn2));
+  serverBtn2.click();
+  await sleep(60);
+  const relayBody = A.doc.getElementById('send-body').textContent;
+  ok('服务器中转进入等待接收状态', relayBody.indexOf('等待同意接收') >= 0, relayBody.slice(0, 80));
+  const relayCalls = A.calls.relayCalls || [];
+  ok('已发起 /api/peer/relay 请求', relayCalls.indexOf('POST /api/peer/relay') >= 0, JSON.stringify(relayCalls));
 
   /* ---------- 汇总 ---------- */
   console.log('\n----------------------------------------');

@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const zlib = require('node:zlib');
 const dns = require('node:dns');
+const crypto = require('node:crypto');
 
 // 本地开发时自动读取 .env.local（该文件被 .gitignore 与 .dockerignore 双重排除）。
 // 生产环境通过 docker -e 注入变量，镜像内不包含任何密钥文件。
@@ -1219,9 +1220,252 @@ async function handlePeerSignal(req, res, session) {
   return sendJson(res, 200, { ok: true, delivered });
 }
 
+/* ---------------- 服务器临时直链中转 ----------------
+ * 点对点直连不可用时的兜底：发送方把文件按 4MB 分块推到服务器临时目录，
+ * 接收方从直链流式下载。文件不进云盘、不长期存储——下载完成 / 取消 / 30 分钟
+ * 超时后立即删除。只要求双方都能访问本服务（局域网、外网均适用）。
+ */
+const RELAY_DIR = path.join(DATA_DIR, '.relay');
+const RELAY_TTL_MS = 30 * 60 * 1000;
+const RELAY_CHUNK_LIMIT = 4 * 1024 * 1024 + 64 * 1024; // 4MB 分块 + 余量
+const RELAY_MAX_SIZE = 4 * 1024 * 1024 * 1024; // 单文件上限 4GB
+const relayTransfers = new Map();
+
+fs.mkdirSync(RELAY_DIR, { recursive: true });
+// 启动时清掉上次进程残留的临时文件
+for (const stale of fs.readdirSync(RELAY_DIR)) {
+  try {
+    fs.unlinkSync(path.join(RELAY_DIR, stale));
+  } catch {
+    /* ignore */
+  }
+}
+
+function relayCleanup(tid, notify) {
+  const t = relayTransfers.get(tid);
+  if (!t) return;
+  relayTransfers.delete(tid);
+  fs.unlink(t.path, () => {});
+  if (notify) relayEvent(t, { t: 'cancel' });
+  console.log(`[relay] cleanup ${tid}`);
+}
+
+// 中转事件只投递给双方（offer→接收方 / accept→发送方 / ready→接收方 / cancel·done→双方）
+function relayEvent(t, data) {
+  const payload = { ...data, tid: t.tid, from: t.from, fromDevice: t.fromDevice };
+  const chunk = `event: peer-relay\ndata: ${JSON.stringify(payload)}\n\n`;
+  for (const client of streamClients) {
+    const isRecipient = client.username === t.to && (!t.toDevice || client.deviceName === t.toDevice);
+    const isSender = client.username === t.from && client.deviceName === t.fromDevice;
+    let hit = isRecipient || isSender;
+    if (data.t === 'offer') hit = isRecipient;
+    if (data.t === 'accept' || data.t === 'done') hit = isSender;
+    if (data.t === 'ready') hit = isRecipient;
+    if (!hit) continue;
+    try {
+      client.res.write(chunk);
+    } catch {
+      streamClients.delete(client);
+    }
+  }
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [tid, t] of relayTransfers) {
+    if (now - (t.readyAt || t.createdAt) > RELAY_TTL_MS) relayCleanup(tid);
+  }
+}, 60 * 1000).unref();
+
+function readRawBody(req, limit) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > limit) {
+        reject(new Error('BODY_TOO_LARGE'));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
+function findRelay(url, req, res) {
+  const tid = String(url.searchParams.get('tid') || '').trim();
+  const t = tid ? relayTransfers.get(tid) : null;
+  if (!t) {
+    fail(res, 404, 'NOT_FOUND', '中转不存在或已过期');
+    return null;
+  }
+  return t;
+}
+
+function relayAllowed(t, session, side) {
+  if (side === 'send') {
+    return t.from.toLowerCase() === session.username.toLowerCase() && session.deviceName === t.fromDevice;
+  }
+  return t.to.toLowerCase() === session.username.toLowerCase();
+}
+
+async function handleRelayStart(req, res, session) {
+  let body;
+  try {
+    body = JSON.parse((await readRawBody(req, 8 * 1024)).toString('utf8') || '{}');
+  } catch {
+    return fail(res, 400, 'INVALID_INPUT', '请求格式错误');
+  }
+  const toRaw = String(body.to || '').trim();
+  const toDevice = String(body.toDevice || '').trim().slice(0, 40);
+  const name = String(body.name || 'file').slice(0, 200);
+  const size = Number(body.size);
+  const mime = String(body.mime || 'application/octet-stream').slice(0, 100);
+  const count = Math.max(1, Math.min(10000, Number(body.count) || 1));
+  const sameUser = toRaw.toLowerCase() === session.username.toLowerCase();
+  if (!toRaw || (sameUser && !toDevice)) {
+    return fail(res, 400, 'INVALID_INPUT', '缺少目标用户或目标设备');
+  }
+  if (!Number.isFinite(size) || size <= 0 || size > RELAY_MAX_SIZE) {
+    return fail(res, 400, 'INVALID_INPUT', '文件大小无效（上限 4GB）');
+  }
+  const target = accounts.findByUsername(toRaw);
+  if (!target) return fail(res, 404, 'NOT_FOUND', '用户不存在');
+  const online = [...streamClients].some(
+    (c) => c.username === target.username && (!toDevice || c.deviceName === toDevice),
+  );
+  if (!online) return fail(res, 404, 'USER_OFFLINE', '对方当前不在线');
+  if (relayTransfers.size >= 8) return fail(res, 429, 'RATE_LIMITED', '中转任务过多，请稍后再试');
+  if (rateLimited(`relay:${session.deviceKey}`)) {
+    return fail(res, 429, 'RATE_LIMITED', '操作太频繁，请稍后再试');
+  }
+  const tid = crypto.randomUUID();
+  const t = {
+    tid,
+    from: session.username,
+    fromDevice: session.deviceName,
+    to: target.username,
+    toDevice,
+    name,
+    size,
+    mime,
+    count,
+    path: path.join(RELAY_DIR, `${tid}.part`),
+    received: 0,
+    phase: 'offer',
+    createdAt: Date.now(),
+    readyAt: 0,
+  };
+  relayTransfers.set(tid, t);
+  relayEvent(t, { t: 'offer', name, size, mime, count });
+  console.log(`[relay] offer ${t.from}@${t.fromDevice} -> ${t.to}@${toDevice || '(全部设备)'} ${name} (${size}B)`);
+  return sendJson(res, 200, { tid });
+}
+
+async function handleRelayAccept(req, res, session, url) {
+  const t = findRelay(url, req, res);
+  if (!t) return undefined;
+  if (!relayAllowed(t, session, 'recv')) return fail(res, 403, 'FORBIDDEN', '无权操作');
+  if (t.phase !== 'offer') return fail(res, 409, 'INVALID_STATE', '该中转已不在等待接收');
+  t.phase = 'upload';
+  relayEvent(t, { t: 'accept' });
+  console.log(`[relay] accept ${t.to} <- ${t.from}@${t.fromDevice} ${t.name}`);
+  return sendJson(res, 200, { ok: true });
+}
+
+async function handleRelayChunk(req, res, session, url) {
+  const t = findRelay(url, req, res);
+  if (!t) return undefined;
+  if (!relayAllowed(t, session, 'send')) return fail(res, 403, 'FORBIDDEN', '无权上传');
+  if (t.phase !== 'upload') return fail(res, 409, 'INVALID_STATE', '对方尚未同意接收');
+  let buf;
+  try {
+    buf = await readRawBody(req, RELAY_CHUNK_LIMIT);
+  } catch {
+    relayCleanup(t.tid);
+    return fail(res, 413, 'BODY_TOO_LARGE', '分块过大（上限 4MB）');
+  }
+  if (!buf.length) return fail(res, 400, 'INVALID_INPUT', '空分块');
+  t.received += buf.length;
+  if (t.received > Math.max(t.size, RELAY_MAX_SIZE)) {
+    relayCleanup(t.tid);
+    return fail(res, 413, 'BODY_TOO_LARGE', '超出文件大小限制');
+  }
+  try {
+    await fs.promises.appendFile(t.path, buf);
+  } catch {
+    relayCleanup(t.tid);
+    return fail(res, 500, 'IO_ERROR', '写入失败');
+  }
+  return sendJson(res, 200, { ok: true, received: t.received });
+}
+
+async function handleRelayDone(req, res, session, url) {
+  const t = findRelay(url, req, res);
+  if (!t) return undefined;
+  if (!relayAllowed(t, session, 'send')) return fail(res, 403, 'FORBIDDEN', '无权操作');
+  if (t.phase !== 'upload') return fail(res, 409, 'INVALID_STATE', '当前状态不可完成');
+  if (t.received !== t.size) return fail(res, 400, 'SIZE_MISMATCH', '文件大小校验不符，请重试');
+  t.phase = 'ready';
+  t.readyAt = Date.now();
+  relayEvent(t, { t: 'ready' });
+  console.log(`[relay] ready ${t.from} -> ${t.to} ${t.name} (${t.size}B)`);
+  return sendJson(res, 200, { ok: true });
+}
+
+function handleRelayDownload(req, res, session, url) {
+  const t = findRelay(url, req, res);
+  if (!t) return undefined;
+  if (!relayAllowed(t, session, 'recv')) return fail(res, 403, 'FORBIDDEN', '无权下载');
+  if (t.phase !== 'ready') return fail(res, 409, 'INVALID_STATE', '文件尚未上传完成');
+  let st;
+  try {
+    st = fs.statSync(t.path);
+  } catch {
+    relayTransfers.delete(t.tid);
+    return fail(res, 404, 'NOT_FOUND', '文件已失效');
+  }
+  const safeName = String(t.name || 'file').replace(/[\r\n"\\]/g, '_');
+  res.writeHead(200, {
+    'Content-Type': 'application/octet-stream',
+    'Content-Length': st.size,
+    'Content-Disposition': `attachment; filename="file"; filename*=UTF-8''${encodeURIComponent(safeName)}`,
+    'Cache-Control': 'no-store',
+  });
+  const rs = fs.createReadStream(t.path);
+  rs.pipe(res);
+  rs.on('error', () => {
+    try {
+      res.destroy();
+    } catch {
+      /* ignore */
+    }
+  });
+  res.on('close', () => {
+    if (!res.writableEnded) return; // 中断/取消不触发 done
+    relayEvent(t, { t: 'done' });
+    relayTransfers.delete(t.tid);
+    fs.unlink(t.path, () => {});
+    console.log(`[relay] done ${t.to} downloaded ${t.name} (${st.size}B)`);
+  });
+  return undefined;
+}
+
+async function handleRelayCancel(req, res, session, url) {
+  const t = findRelay(url, req, res);
+  if (!t) return undefined;
+  if (!relayAllowed(t, session, 'send') && !relayAllowed(t, session, 'recv')) {
+    return fail(res, 403, 'FORBIDDEN', '无权操作');
+  }
+  relayCleanup(t.tid, true);
+  return sendJson(res, 200, { ok: true });
+}
+
 async function handleApi(req, res, url) {
   const route = `${req.method} ${url.pathname}`;
-
   switch (route) {
     case 'POST /api/register':
       if (accounts.count() >= LIMITS.maxAccounts) {
@@ -1300,6 +1544,37 @@ async function handleApi(req, res, url) {
     const session = requireSession(req, res);
     if (!session) return undefined;
     return handlePeerSignal(req, res, session);
+  }
+
+  if (route === 'POST /api/peer/relay') {
+    const session = requireSession(req, res);
+    if (!session) return undefined;
+    return handleRelayStart(req, res, session);
+  }
+  if (route === 'POST /api/peer/relay/accept') {
+    const session = requireSession(req, res);
+    if (!session) return undefined;
+    return handleRelayAccept(req, res, session, url);
+  }
+  if (route === 'POST /api/peer/relay/chunk') {
+    const session = requireSession(req, res);
+    if (!session) return undefined;
+    return handleRelayChunk(req, res, session, url);
+  }
+  if (route === 'POST /api/peer/relay/done') {
+    const session = requireSession(req, res);
+    if (!session) return undefined;
+    return handleRelayDone(req, res, session, url);
+  }
+  if (route === 'GET /api/peer/relay/download') {
+    const session = requireSession(req, res);
+    if (!session) return undefined;
+    return handleRelayDownload(req, res, session, url);
+  }
+  if (route === 'POST /api/peer/relay/cancel') {
+    const session = requireSession(req, res);
+    if (!session) return undefined;
+    return handleRelayCancel(req, res, session, url);
   }
 
   if (route === 'POST /api/files/sign') {

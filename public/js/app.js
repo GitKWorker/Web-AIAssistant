@@ -580,6 +580,11 @@
       if (data && data.payload) handlePeerSignal(data);
     });
 
+    es.addEventListener('peer-relay', function (event) {
+      var data = parseEvent(event);
+      if (data) handleRelayEvent(data);
+    });
+
     es.onerror = function () {
       state.sseOk = false;
       setConnected(false);
@@ -2731,6 +2736,7 @@
   var LAN_RTT_MS = 10;
   // 等待对方同意 + 建连 + 探测的总时限：给对方足够时间点「接收」
   var PROBE_TIMEOUT = 60000;
+  var RELAY_TTL_MS = 30 * 60 * 1000;
   var ICE_SERVERS = [{ urls: ['stun:stun.cloudflare.com:3478', 'stun:stun.l.google.com:19302'] }];
 
   function peerSignal(to, payload, toDevice) {
@@ -2863,7 +2869,40 @@
       sendProgressRow('云盘中转上传中');
     } else if (phase === 'relay') {
       hint('直传不可用：' + (ps.reason || '与对方不在同一局域网') + '。');
-      hint('同意后文件将上传到云盘中转（7 天自动过期），对方从云端下载。');
+      hint('选择中转方式：服务器中转（文件临时放服务器，对方下载后立即删除，不进云盘，局域网/外网均可用）或云盘中转（云端保存 7 天）。');
+      var relayRow = document.createElement('div');
+      relayRow.className = 'send-actions';
+      el.sendBody.appendChild(relayRow);
+      var serverBtn = actionButton('服务器中转', function () {
+        doServerRelay();
+      }, true);
+      serverBtn.classList.add('btn-sm');
+      var cloudBtn = actionButton('云盘中转', function () {
+        doRelay();
+      });
+      cloudBtn.classList.add('btn-sm');
+      relayRow.appendChild(serverBtn);
+      relayRow.appendChild(cloudBtn);
+    } else if (phase === 'lan-offer') {
+      hint('正在请求对方接收（服务器中转）…');
+    } else if (phase === 'lan-wait-accept') {
+      hint('已通知对方，等待同意接收…（最长 ' + Math.round(RELAY_TTL_MS / 1000) + ' 秒后自动过期）');
+    } else if (phase === 'lan-uploading') {
+      sendProgressRow('服务器中转上传中');
+    } else if (phase === 'lan-wait-download') {
+      hint('已上传完成，等待对方下载…');
+    } else if (phase === 'incoming-relay') {
+      hint(
+        (ps.target || '对方') + '（' + (ps.fromDevice || 'Web') + '）想给你发送文件，接收后经服务器中转（文件临时存放，下载后立即删除，不进云盘）：'
+      );
+      var rinfo = document.createElement('div');
+      rinfo.className = 'p-fileinfo';
+      rinfo.textContent = ps.meta && ps.meta.name ? ps.meta.name + '（' + fmtSize(ps.meta.size) + (ps.meta.count > 1 ? '，' + ps.meta.count + ' 个文件打包' : '') + '）' : '未知文件';
+      el.sendBody.appendChild(rinfo);
+    } else if (phase === 'relay-ready-wait') {
+      hint('已同意，等待对方上传完成…');
+    } else if (phase === 'relay-downloading') {
+      sendProgressRow('接收中');
     } else if (phase === 'incoming') {
       hint(
         (ps.target || '对方') + '（' + (ps.fromDevice || 'Web') + '）想给你发送文件，接收后通过局域网点对点直传，文件不经过服务器：'
@@ -2876,6 +2915,8 @@
       hint('✓ 传输完成');
     } else if (phase === 'done-relay') {
       hint('✓ 已通过云盘中转，等对方下载');
+    } else if (phase === 'done-server') {
+      hint('✓ 已通过服务器中转，对方已下载完成');
     }
   }
 
@@ -2883,7 +2924,7 @@
     var ps = state.peerSession;
     if (!ps) return;
     if (ps.phase === 'incoming') acceptIncoming();
-    else if (ps.phase === 'relay') doRelay();
+    else if (ps.phase === 'incoming-relay') acceptRelayIncoming();
   }
 
   function onSendCancel() {
@@ -2892,6 +2933,13 @@
     if (ps.phase === 'incoming') {
       declineIncoming();
       return;
+    }
+    if (ps.phase === 'incoming-relay') {
+      declineRelayIncoming();
+      return;
+    }
+    if (ps.relayTid && ps.phase !== 'pick' && ps.phase !== 'relay') {
+      api('POST', '/api/peer/relay/cancel?tid=' + encodeURIComponent(ps.relayTid), null).catch(function () {});
     }
     if (ps.phase === 'transferring' || ps.phase === 'probing' || ps.phase === 'connecting') {
       // 中途取消：通知对方
@@ -3284,11 +3332,265 @@
     ps.phase = 'relay';
     ps.reason = reason;
     el.sendTitle.textContent = '发送文件给 ' + ps.target;
-    el.sendOk.hidden = false;
-    el.sendOk.textContent = '同意中转';
+    el.sendOk.hidden = true;
     el.sendCancel.hidden = false;
     el.sendCancel.textContent = '取消';
     renderSendPhase();
+  }
+
+  /* ---------------- 服务器临时直链中转 ---------------- */
+
+  function doServerRelay() {
+    var ps = state.peerSession;
+    if (!ps || !ps.blob) return;
+    var file = ps.blob instanceof File ? ps.blob : new File([ps.blob], ps.meta.name, { type: 'application/zip' });
+    ps._file = file;
+    ps.relayTid = '';
+    ps.phase = 'lan-offer';
+    renderSendPhase();
+    api('POST', '/api/peer/relay', {
+      to: ps.target,
+      toDevice: ps.targetDevice || '',
+      name: file.name,
+      size: file.size,
+      mime: file.type || 'application/octet-stream',
+      count: (ps.meta && ps.meta.count) || 1,
+    })
+      .then(function (data) {
+        if (state.peerSession !== ps) return;
+        ps.relayTid = data.tid;
+        ps.phase = 'lan-wait-accept';
+        renderSendPhase();
+      })
+      .catch(function (err) {
+        if (state.peerSession !== ps) return;
+        ps.phase = 'relay';
+        ps.reason = (err && err.message) || '中转发起失败';
+        renderSendPhase();
+      });
+  }
+
+  function startServerUpload(ps) {
+    if (!ps || ps.role !== 'send' || !ps._file || !ps.relayTid) return;
+    var file = ps._file;
+    var CHUNK = 4 * 1024 * 1024;
+    var offset = 0;
+    ps.phase = 'lan-uploading';
+    renderSendPhase();
+    var step = function () {
+      if (state.peerSession !== ps) return Promise.resolve();
+      if (offset >= file.size) {
+        return api('POST', '/api/peer/relay/done?tid=' + encodeURIComponent(ps.relayTid), null).then(function () {
+          if (state.peerSession !== ps) return;
+          ps.phase = 'lan-wait-download';
+          renderSendPhase();
+        });
+      }
+      var end = Math.min(offset + CHUNK, file.size);
+      setSendProgress(end / file.size);
+      return fetch('/api/peer/relay/chunk?tid=' + encodeURIComponent(ps.relayTid) + '&offset=' + offset, {
+        method: 'POST',
+        headers: { 'X-Session-Id': state.sessionId, 'Content-Type': 'application/octet-stream' },
+        body: file.slice(offset, end),
+        cache: 'no-store',
+      }).then(function (res) {
+        if (!res.ok) throw new Error('上传失败（' + res.status + '）');
+        offset = end;
+        return step();
+      });
+    };
+    step().catch(function (err) {
+      if (state.peerSession !== ps) return;
+      ps.phase = 'relay';
+      ps.reason = (err && err.message) || '上传失败';
+      renderSendPhase();
+    });
+  }
+
+  function acceptRelayIncoming() {
+    var ps = state.peerSession;
+    if (!ps || ps.role !== 'recv-relay' || ps.accepting) return;
+    ps.accepting = true;
+    var proceed = function (writer) {
+      ps.writer = writer || null;
+      ps.phase = 'relay-ready-wait';
+      renderSendPhase();
+      api('POST', '/api/peer/relay/accept?tid=' + encodeURIComponent(ps.relayTid), null).catch(function (err) {
+        if (state.peerSession !== ps) return;
+        toast((err && err.message) || '中转接收失败');
+        closeSendModal();
+      });
+    };
+    if (window.showSaveFilePicker) {
+      window.showSaveFilePicker({ suggestedName: (ps.meta && ps.meta.name) || 'file' })
+        .then(function (handle) {
+          return handle.createWritable().then(function (w) {
+            proceed(w);
+          });
+        })
+        .catch(function (err) {
+          if (err && err.name === 'AbortError') {
+            ps.accepting = false;
+            declineRelayIncoming();
+            return;
+          }
+          proceed(null);
+        });
+      return;
+    }
+    proceed(null);
+  }
+
+  function declineRelayIncoming() {
+    var ps = state.peerSession;
+    if (ps && ps.relayTid) {
+      api('POST', '/api/peer/relay/cancel?tid=' + encodeURIComponent(ps.relayTid), null).catch(function () {});
+    }
+    closeSendModal();
+  }
+
+  function startRelayDownload(ps) {
+    if (!ps || ps.role !== 'recv-relay' || !ps.relayTid) return;
+    ps.phase = 'relay-downloading';
+    renderSendPhase();
+    fetch('/api/peer/relay/download?tid=' + encodeURIComponent(ps.relayTid), {
+      headers: { 'X-Session-Id': state.sessionId },
+      cache: 'no-store',
+    })
+      .then(function (res) {
+        if (!res.ok) throw new Error('下载失败（' + res.status + '）');
+        var total = Number(res.headers.get('content-length') || (ps.meta && ps.meta.size) || 0);
+        var received = 0;
+        if (!res.body || !res.body.getReader) {
+          return res.blob().then(function (blob) {
+            return finishRelayDownload(ps, blob);
+          });
+        }
+        var reader = res.body.getReader();
+        var next = function () {
+          if (state.peerSession !== ps) return;
+          return reader.read().then(function (r) {
+            if (r.done) return finishRelayDownload(ps, null);
+            received += r.value.byteLength;
+            if (ps.writer) {
+              ps.writer.write(r.value).catch(function () {});
+            } else {
+              ps.chunks.push(r.value);
+            }
+            if (total) setSendProgress(received / total);
+            return next();
+          });
+        };
+        return next();
+      })
+      .catch(function (err) {
+        if (state.peerSession !== ps) return;
+        toast((err && err.message) || '下载失败');
+        closeSendModal();
+      });
+  }
+
+  function finishRelayDownload(ps, blob) {
+    if (state.peerSession !== ps) return;
+    var done = function () {
+      ps.phase = 'done';
+      renderSendPhase();
+      toast('已接收 ' + (ps.meta && ps.meta.name ? ps.meta.name : '文件'));
+      postRelayRecord(ps);
+      setTimeout(function () {
+        if (state.peerSession === ps) closeSendModal();
+      }, 1200);
+    };
+    if (blob) {
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = (ps.meta && ps.meta.name) || 'file';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(function () {
+        URL.revokeObjectURL(url);
+      }, 5000);
+      done();
+      return;
+    }
+    if (ps.writer) {
+      ps.writer.close().then(done, done);
+      ps.writer = null;
+      return;
+    }
+    var blob2 = new Blob(ps.chunks, { type: 'application/octet-stream' });
+    ps.chunks = [];
+    var url2 = URL.createObjectURL(blob2);
+    var a2 = document.createElement('a');
+    a2.href = url2;
+    a2.download = (ps.meta && ps.meta.name) || 'file';
+    document.body.appendChild(a2);
+    a2.click();
+    a2.remove();
+    setTimeout(function () {
+      URL.revokeObjectURL(url2);
+    }, 5000);
+    done();
+  }
+
+  function postRelayRecord(ps) {
+    var content = '已通过服务器中转「' + (ps.meta && ps.meta.name ? ps.meta.name : '文件') + '」（' + fmtSize(ps.meta && ps.meta.size) + '）';
+    api('POST', '/api/messages', { content: content, clientMsgId: uuid(), file: { name: ps.meta && ps.meta.name, size: ps.meta && ps.meta.size, mime: ps.meta && ps.meta.mime }, to: ps.target }).catch(function () {});
+  }
+
+  function handleRelayEvent(data) {
+    var ps = state.peerSession;
+    if (data.t === 'offer') {
+      // 接收端：收到中转请求
+      if (ps && ps.phase !== 'pick' && ps.phase !== 'relay' && ps.phase !== 'done' && ps.phase !== 'done-relay' && ps.phase !== 'done-server') {
+        api('POST', '/api/peer/relay/cancel?tid=' + encodeURIComponent(data.tid), null).catch(function () {});
+        toast('对方请求传输，但当前正忙');
+        return;
+      }
+      if (ps) closeSendModal();
+      state.peerSession = {
+        role: 'recv-relay',
+        relayTid: data.tid,
+        target: data.from,
+        targetDevice: data.fromDevice || '',
+        fromDevice: data.fromDevice || 'Web',
+        phase: 'incoming-relay',
+        meta: { name: data.name || '文件', size: data.size || 0, mime: data.mime || '', count: data.count || 1 },
+        writer: null,
+        chunks: [],
+        received: 0,
+        accepting: false,
+      };
+      el.sendTitle.textContent = data.from + ' 请求发送文件';
+      el.sendOk.hidden = false;
+      el.sendOk.textContent = '接收';
+      el.sendCancel.hidden = false;
+      el.sendCancel.textContent = '拒绝';
+      renderSendPhase();
+      el.sendModal.hidden = false;
+      return;
+    }
+    if (!ps) return;
+    if (data.tid && ps.relayTid && data.tid !== ps.relayTid) return;
+    if (data.t === 'accept' && ps.role === 'send') {
+      startServerUpload(ps);
+    } else if (data.t === 'ready' && ps.role === 'recv-relay' && ps.phase === 'relay-ready-wait') {
+      startRelayDownload(ps);
+    } else if (data.t === 'done' && ps.role === 'send' && ps.phase === 'lan-wait-download') {
+      ps.phase = 'done-server';
+      renderSendPhase();
+      postRelayRecord(ps);
+      setTimeout(function () {
+        if (state.peerSession === ps) closeSendModal();
+      }, 1200);
+    } else if (data.t === 'cancel') {
+      if (ps.relayTid === data.tid || !data.tid) {
+        closeSendModal();
+        toast('对方取消了传输');
+      }
+    }
   }
 
   function doRelay() {
@@ -3323,7 +3625,6 @@
         if (state.peerSession !== ps) return;
         ps.phase = 'relay';
         ps.reason = (err && err.message) || '云盘中转上传失败';
-        el.sendOk.hidden = false;
         renderSendPhase();
       });
   }
