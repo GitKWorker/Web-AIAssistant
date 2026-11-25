@@ -67,13 +67,6 @@
     </nav>
 
     <div class="sidebar-foot">
-      <div class="me">
-        <div class="avatar" id="me-avatar">·</div>
-        <div class="me-text">
-          <div class="me-name" id="me-name">—</div>
-          <div class="me-device" id="me-device">—</div>
-        </div>
-      </div>
       <div class="me-status">
         <span class="dot" id="conn-dot"></span>
         <span id="conn-text">连接中…</span>
@@ -89,11 +82,8 @@
           <p>全体在线成员可见 · 首屏加载最近 3 条</p>
         </div>
         <div class="pill"><span class="dot"></span><span id="online-pill">0 / 20</span></div>
+        <button type="button" class="members-toggle" id="members-toggle" aria-label="在线成员">成员</button>
       </header>
-
-      <div class="online-bar" id="online-bar">
-        <div class="online-chips" id="online-chips"></div>
-      </div>
 
       <div class="messages" id="messages"></div>
 
@@ -348,6 +338,22 @@
       </div>
     </section>
   </main>
+
+  <aside class="rsidebar" id="rsidebar">
+    <div class="rs-me">
+      <div class="me">
+        <div class="avatar" id="me-avatar">·</div>
+        <div class="me-text">
+          <div class="me-name" id="me-name">—</div>
+          <div class="me-device" id="me-device">—</div>
+        </div>
+      </div>
+      <button type="button" class="rs-logout" id="logout-btn">退出登录</button>
+    </div>
+    <div class="rs-sep"></div>
+    <div class="rs-title">在线成员 <span class="rs-count" id="rs-count">0</span></div>
+    <div class="rs-members" id="rs-members"></div>
+  </aside>
 </div>
 
 <div class="preview" id="preview" hidden>

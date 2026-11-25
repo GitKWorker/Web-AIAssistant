@@ -196,7 +196,10 @@
     el.qrFile = $('qr-file');
     el.qrUrl = $('qr-url');
     el.qrCopy = $('qr-copy');
-    el.onlineChips = $('online-chips');
+    el.onlineChips = $('rs-members');
+    el.rsCount = $('rs-count');
+    el.logoutBtn = $('logout-btn');
+    el.membersToggle = $('members-toggle');
     el.sendModal = $('send-modal');
     el.sendMask = $('send-mask');
     el.sendTitle = $('send-title');
@@ -2496,56 +2499,49 @@
     renderOnlineChips();
   }
 
-  // 同一用户多台设备合并为一个头像块；点别人 = 发文件
+  // 每台设备一个独立条目（同一用户多设备登录互不合并）；点别人 = 给该设备发文件
   function renderOnlineChips() {
     if (!el.onlineChips) return;
     el.onlineChips.textContent = '';
-    var map = new Map();
-    state.members.forEach(function (m) {
-      if (!m || !m.username) return;
-      var entry = map.get(m.username);
-      if (!entry) {
-        entry = { username: m.username, devices: [] };
-        map.set(m.username, entry);
-      }
-      entry.devices.push(m.deviceName || 'Web');
-    });
-    var me = state.me && state.me.username;
-    if (!map.size) {
+    if (el.rsCount) el.rsCount.textContent = String(state.members.length);
+    var me = state.me;
+    if (!state.members.length) {
       var empty = document.createElement('span');
       empty.className = 'online-empty';
       empty.textContent = '暂无在线成员';
       el.onlineChips.appendChild(empty);
       return;
     }
-    map.forEach(function (entry) {
+    state.members.forEach(function (m) {
+      if (!m || !m.username) return;
+      var device = m.deviceName || 'Web';
+      var isSelf = me && m.username === me.username && device === (me.deviceName || '');
       var chip = document.createElement('button');
       chip.type = 'button';
       chip.className = 'online-chip';
-      var isSelf = me && entry.username === me;
       if (isSelf) chip.classList.add('is-self');
 
       var avatar = document.createElement('span');
       avatar.className = 'oc-avatar';
-      avatar.textContent = firstChar(entry.username);
+      avatar.textContent = firstChar(m.username);
 
       var texts = document.createElement('span');
       texts.className = 'oc-text';
       var name = document.createElement('span');
       name.className = 'oc-name';
-      name.textContent = entry.username + (isSelf ? '（我）' : '');
+      name.textContent = m.username + (isSelf ? '（我）' : '');
       var dev = document.createElement('span');
       dev.className = 'oc-dev';
-      dev.textContent = entry.devices.join(' / ');
+      dev.textContent = device;
       texts.appendChild(name);
       texts.appendChild(dev);
 
       chip.appendChild(avatar);
       chip.appendChild(texts);
       if (!isSelf) {
-        chip.title = '给 ' + entry.username + ' 发文件';
+        chip.title = '给 ' + m.username + '（' + device + '）发文件';
         chip.addEventListener('click', function () {
-          openSendModal(entry.username);
+          openSendModal(m.username, device);
         });
       }
       el.onlineChips.appendChild(chip);
@@ -2688,13 +2684,20 @@
   var PROBE_TIMEOUT = 15000;
   var ICE_SERVERS = [{ urls: ['stun:stun.cloudflare.com:3478', 'stun:stun.l.google.com:19302'] }];
 
-  function peerSignal(to, payload) {
-    return api('POST', '/api/peer/signal', { to: to, payload: payload });
+  function peerSignal(to, payload, toDevice) {
+    return api('POST', '/api/peer/signal', { to: to, toDevice: toDevice || '', payload: payload });
   }
 
-  function openSendModal(username) {
-    state.peerSession = { role: 'send', target: username, phase: 'pick', meta: null, blob: null };
-    el.sendTitle.textContent = '发送文件给 ' + username;
+  function openSendModal(username, deviceName) {
+    state.peerSession = {
+      role: 'send',
+      target: username,
+      targetDevice: deviceName || '',
+      phase: 'pick',
+      meta: null,
+      blob: null,
+    };
+    el.sendTitle.textContent = deviceName ? '发送文件给 ' + username + ' · ' + deviceName : '发送文件给 ' + username;
     el.sendOk.hidden = true;
     el.sendCancel.hidden = false;
     el.sendCancel.textContent = '取消';
@@ -2831,7 +2834,7 @@
     }
     if (ps.phase === 'transferring' || ps.phase === 'probing' || ps.phase === 'connecting') {
       // 中途取消：通知对方
-      peerSignal(ps.target, { kind: 'ctrl', t: 'cancel' }).catch(function () {});
+      peerSignal(ps.target, { kind: 'ctrl', t: 'cancel' }, ps.targetDevice).catch(function () {});
     }
     closeSendModal();
   }
@@ -2962,7 +2965,7 @@
 
     pc.onicecandidate = function (event) {
       if (event.candidate) {
-        peerSignal(ps.target, { kind: 'cand', cand: event.candidate.toJSON() }).catch(function () {});
+        peerSignal(ps.target, { kind: 'cand', cand: event.candidate.toJSON() }, ps.targetDevice).catch(function () {});
       }
     };
     pc.onconnectionstatechange = function () {
@@ -2977,7 +2980,7 @@
         return pc.setLocalDescription(offer);
       })
       .then(function () {
-        peerSignal(ps.target, { kind: 'offer', sdp: ps.pc.localDescription.toJSON(), meta: ps.meta }).catch(function (err) {
+        peerSignal(ps.target, { kind: 'offer', sdp: ps.pc.localDescription.toJSON(), meta: ps.meta }, ps.targetDevice).catch(function (err) {
           if (state.peerSession === ps && ps.phase === 'probing') {
             offerRelay(err && err.message ? err.message : '信令发送失败');
           }
@@ -3186,13 +3189,14 @@
 
     if (p.kind === 'offer') {
       if (ps && ps.phase !== 'pick' && ps.phase !== 'relay' && ps.phase !== 'done' && ps.phase !== 'done-relay') {
-        peerSignal(data.from, { kind: 'ctrl', t: 'busy' }).catch(function () {});
+        peerSignal(data.from, { kind: 'ctrl', t: 'busy' }, data.fromDevice).catch(function () {});
         return;
       }
       if (ps) cleanupPeerSession(ps);
       state.peerSession = {
         role: 'recv',
         target: data.from,
+        targetDevice: data.fromDevice || '',
         fromDevice: data.fromDevice || 'Web',
         phase: 'incoming',
         meta: p.meta || { name: '文件', size: 0, count: 1 },
@@ -3290,7 +3294,7 @@
 
   function declineIncoming() {
     var ps = state.peerSession;
-    if (ps) peerSignal(ps.target, { kind: 'ctrl', t: 'decline' }).catch(function () {});
+    if (ps) peerSignal(ps.target, { kind: 'ctrl', t: 'decline' }, ps.targetDevice).catch(function () {});
     closeSendModal();
   }
 
@@ -3309,7 +3313,7 @@
     ps.pc = pc;
     pc.onicecandidate = function (event) {
       if (event.candidate) {
-        peerSignal(ps.target, { kind: 'cand', cand: event.candidate.toJSON() }).catch(function () {});
+        peerSignal(ps.target, { kind: 'cand', cand: event.candidate.toJSON() }, ps.targetDevice).catch(function () {});
       }
     };
     pc.ondatachannel = function (event) {
@@ -3334,7 +3338,7 @@
         return pc.setLocalDescription(answer);
       })
       .then(function () {
-        peerSignal(ps.target, { kind: 'answer', sdp: ps.pc.localDescription.toJSON() }).catch(function () {});
+        peerSignal(ps.target, { kind: 'answer', sdp: ps.pc.localDescription.toJSON() }, ps.targetDevice).catch(function () {});
         (ps.pendingCands || []).forEach(function (cand) {
           try {
             pc.addIceCandidate(cand).catch(function () {});
@@ -3570,6 +3574,11 @@
       el.sendFolder.value = '';
     });
 
+    el.logoutBtn.addEventListener('click', logout);
+    el.membersToggle.addEventListener('click', function () {
+      document.body.classList.toggle('rs-open');
+    });
+
     el.previewClose.addEventListener('click', closePreview);
     el.previewMask.addEventListener('click', closePreview);
     el.previewDownload.addEventListener('click', function () {
@@ -3582,6 +3591,10 @@
     });
     document.addEventListener('keydown', function (event) {
       if (event.key !== 'Escape') return;
+      if (document.body.classList.contains('rs-open')) {
+        document.body.classList.remove('rs-open');
+        return;
+      }
       if (el.sendModal && !el.sendModal.hidden) {
         onSendCancel();
         return;

@@ -4,6 +4,7 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const zlib = require('node:zlib');
+const dns = require('node:dns');
 
 // 本地开发时自动读取 .env.local（该文件被 .gitignore 与 .dockerignore 双重排除）。
 // 生产环境通过 docker -e 注入变量，镜像内不包含任何密钥文件。
@@ -162,7 +163,7 @@ function openStream(req, res, url) {
     `event: hello\ndata: ${JSON.stringify({ online: sessions.count(), members: sessions.members(), cursor: last, serverTime: Date.now() })}\n\n`,
   );
 
-  const client = { res, sessionId: session.sessionId, username: session.username };
+  const client = { res, sessionId: session.sessionId, username: session.username, deviceName: session.deviceName };
   streamClients.add(client);
 
   const ping = setInterval(() => {
@@ -230,6 +231,39 @@ function clientIp(req) {
 function cleanDeviceName(raw) {
   const value = String(raw || '').trim().replace(/\s+/g, ' ').slice(0, 20);
   return DEVICE_RE.test(value) ? value : 'Web';
+}
+
+// 尝试反向 DNS 解析客户端主机名：局域网内路由器（dnsmasq 等）通常会给 DHCP
+// 主机登记 PTR 记录，能拿到比「系统-浏览器」更准确的 PC 名。浏览器受隐私
+// 限制拿不到本机主机名，所以由服务端代查。结果缓存 1 小时，失败返回 null。
+const HOSTNAME_TTL = 60 * 60 * 1000;
+const hostnameCache = new Map();
+function lookupHostname(ip) {
+  const isLan = /^(10\.|192\.168\.|127\.0\.0\.1$|172\.(1[6-9]|2\d|3[01])\.)/.test(String(ip || ''));
+  if (!isLan) return Promise.resolve(null);
+  if (hostnameCache.has(ip)) return Promise.resolve(hostnameCache.get(ip));
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      hostnameCache.set(ip, value);
+      setTimeout(() => hostnameCache.delete(ip), HOSTNAME_TTL).unref?.();
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(null), 900);
+    try {
+      dns.reverse(ip, (err, names) => {
+        clearTimeout(timer);
+        if (err || !Array.isArray(names) || !names.length) return finish(null);
+        const host = String(names[0]).split('.')[0].trim();
+        finish(host && host.length >= 2 && DEVICE_RE.test(host) ? host.slice(0, 20) : null);
+      });
+    } catch {
+      clearTimeout(timer);
+      finish(null);
+    }
+  });
 }
 
 function requireSession(req, res) {
@@ -310,7 +344,6 @@ async function handleLogin(req, res) {
   const body = await readBody(req);
   const username = String(body.username || '').trim();
   const password = String(body.password || '');
-  const deviceName = cleanDeviceName(body.deviceName);
   if (!username || !password) {
     return fail(res, 400, 'INVALID_INPUT', '请输入用户名和密码');
   }
@@ -318,6 +351,10 @@ async function handleLogin(req, res) {
   if (!account) {
     return fail(res, 401, 'INVALID_CREDENTIALS', '用户名或密码不正确');
   }
+  // 设备名优先级：局域网内反查 PC 主机名（PTR 记录）> 浏览器探测/用户填写。
+  // 反查失败或超时不影响登录，直接用前端传来的名字。
+  const hostName = await lookupHostname(clientIp(req));
+  const deviceName = cleanDeviceName(hostName || body.deviceName);
   const deviceKey = `${account.username}#${deviceName}`;
   const sameDevice = sessions.findByIdentity(deviceKey);
   if (!sameDevice && sessions.count() >= LIMITS.maxOnline) {
@@ -1103,8 +1140,12 @@ async function handlePeerSignal(req, res, session) {
     return fail(res, 400, 'INVALID_INPUT', '信令内容无效');
   }
   const targets = [];
+  // 可选 toDevice：指定目标设备（同一账号多台设备各自独立）。缺省时投递给对方全部在线设备。
+  const toDevice = String(body.toDevice || '').trim().slice(0, 40);
   for (const client of streamClients) {
-    if (client.username === target.username) targets.push(client);
+    if (client.username !== target.username) continue;
+    if (toDevice && client.deviceName !== toDevice) continue;
+    targets.push(client);
   }
   if (!targets.length) {
     return fail(res, 404, 'USER_OFFLINE', '对方当前不在线');

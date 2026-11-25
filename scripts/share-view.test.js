@@ -693,18 +693,22 @@ function dropFile(win, doc, name, type, size) {
   ok('删除文件夹请求带完整路径', deletes.length === 1 && deletes[0] === '工作/2026', String(deletes));
   MOCK_TREE = false;
 
-  /* ---------- 场景 13：在线成员列表与发文件入口 ---------- */
-  console.log('\n[13] 在线成员列表与发文件入口');
-  const chips = A.doc.querySelectorAll('#online-chips .online-chip');
-  ok('在线成员按用户归组（2 人）', chips.length === 2, String(chips.length));
-  const selfChip = A.doc.querySelector('#online-chips .online-chip.is-self');
-  ok('自己标记（我）', Boolean(selfChip) && selfChip.textContent.indexOf('（我）') >= 0);
-  const peerChip = Array.from(chips).find((c) => !c.classList.contains('is-self'));
-  ok('对方 chip 标题可发文件', Boolean(peerChip) && peerChip.getAttribute('title') === '给 李雷 发文件');
+  /* ---------- 场景 13：右侧栏在线成员列表与发文件入口 ---------- */
+  console.log('\n[13] 右侧栏在线成员列表与发文件入口');
+  const chips = A.doc.querySelectorAll('#rs-members .online-chip');
+  ok('成员按设备独立展示（3 条）', chips.length === 3, String(chips.length));
+  const selfChip = A.doc.querySelector('#rs-members .online-chip.is-self');
+  ok('自己设备标记（我）', Boolean(selfChip) && selfChip.textContent.indexOf('（我）') >= 0);
+  const selfCount = Array.from(chips).filter((c) => c.classList.contains('is-self')).length;
+  ok('自己只标自己那台设备', selfCount === 1, String(selfCount));
+  const peerChip = Array.from(chips).find((c) => c.textContent.indexOf('MacBook') >= 0);
+  ok('对方 chip 标题可发文件', Boolean(peerChip) && peerChip.getAttribute('title') === '给 李雷（MacBook）发文件');
+  ok('在线人数徽标', A.doc.getElementById('rs-count').textContent === '3', A.doc.getElementById('rs-count').textContent);
+  ok('退出登录按钮存在', Boolean(A.doc.getElementById('logout-btn')));
   peerChip.click();
   await sleep(40);
   ok('发文件弹层打开', A.doc.getElementById('send-modal').hidden === false);
-  ok('弹层标题指向对方', A.doc.getElementById('send-title').textContent === '发送文件给 李雷');
+  ok('弹层标题指向对方设备', A.doc.getElementById('send-title').textContent === '发送文件给 李雷 · MacBook', A.doc.getElementById('send-title').textContent);
   ok('弹层有选择文件/文件夹按钮',
     A.doc.getElementById('send-body').textContent.indexOf('选择文件') >= 0 &&
     A.doc.getElementById('send-body').textContent.indexOf('选择文件夹') >= 0);
