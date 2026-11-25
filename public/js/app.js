@@ -464,7 +464,7 @@
     el.appView.hidden = false;
 
     el.meName.textContent = data.me.username;
-    el.meDevice.textContent = data.me.deviceName;
+    el.meDevice.textContent = data.me.deviceName + (data.me.ip ? ' · ' + data.me.ip : '');
     el.meAvatar.textContent = firstChar(data.me.username);
     el.authDevice.value = data.me.deviceName;
 
@@ -1677,6 +1677,11 @@
       el.fsHint.textContent = '目标文件夹，留空表示根目录 · ' + (item ? item.name : '');
       el.fsInput.value = item && item.folder ? item.folder : '';
       el.fsOk.textContent = '移动';
+    } else if (mode === 'renameFolder') {
+      el.fsTitle.textContent = '重命名文件夹';
+      el.fsHint.textContent = '只改名字，位置不变 · 文件夹内 ' + (item && item.count ? item.count + ' 个文件' : '内容');
+      el.fsInput.value = item ? item.name : '';
+      el.fsOk.textContent = '重命名';
     } else {
       el.fsTitle.textContent = '新建文件夹';
       el.fsHint.textContent = '可用 / 分隔建多层，例如 工作/2026';
@@ -1723,6 +1728,36 @@
         function (err) {
           el.fsOk.disabled = false;
           toast((err && err.message) || '移动失败');
+        },
+      );
+      return;
+    }
+
+    if (mode === 'renameFolder') {
+      var oldPath = state.fsKey;
+      if (!oldPath) return done();
+      if (value.indexOf('/') >= 0) {
+        el.fsOk.disabled = false;
+        return toast('名称不能包含 /');
+      }
+      var segs = oldPath.split('/');
+      var parent = segs.slice(0, -1).join('/');
+      var newPath = parent ? parent + '/' + value : value;
+      if (newPath === oldPath) return done();
+      api('POST', '/api/files/rename-folder', { store: store, path: oldPath, newPath: newPath }).then(
+        function () {
+          done();
+          toast('已重命名为 ' + value);
+          // 当前正停在旧目录（或其子目录）里时，跟随跳到新路径
+          if (state.folder === oldPath || state.folder.indexOf(oldPath + '/') === 0) {
+            enterFolder(state.folder.replace(oldPath, newPath));
+          } else {
+            loadCloudFiles(true);
+          }
+        },
+        function (err) {
+          el.fsOk.disabled = false;
+          toast((err && err.message) || '重命名失败');
         },
       );
       return;
@@ -1813,6 +1848,19 @@
 
       var btns = document.createElement('div');
       btns.className = 'cf-btns';
+      var renBtn = document.createElement('button');
+      renBtn.type = 'button';
+      renBtn.className = 'btn-ghost btn-sm cf-icon';
+      renBtn.title = '重命名文件夹';
+      renBtn.setAttribute('aria-label', '重命名文件夹');
+      renBtn.innerHTML =
+        '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">' +
+        '<path d="M4 20h4L19.5 8.5a2.1 2.1 0 0 0-3-3L5 17v3z"/><path d="M13.5 6.5l3 3"/></svg>';
+      renBtn.addEventListener('click', function (event) {
+        event.stopPropagation();
+        openFsModal('renameFolder', { key: dir.path, name: dir.name, count: dir.count });
+      });
+      btns.appendChild(renBtn);
       var delBtn = document.createElement('button');
       delBtn.type = 'button';
       delBtn.className = 'btn-ghost btn-sm cf-icon cf-danger';
@@ -2532,7 +2580,7 @@
       name.textContent = m.username + (isSelf ? '（我）' : '');
       var dev = document.createElement('span');
       dev.className = 'oc-dev';
-      dev.textContent = device;
+      dev.textContent = device + (m.ip ? ' · ' + m.ip : '');
       texts.appendChild(name);
       texts.appendChild(dev);
 
@@ -2681,7 +2729,8 @@
   var PEER_HIGH = 4 * 1024 * 1024;
   var PEER_LOW = 1 * 1024 * 1024;
   var LAN_RTT_MS = 10;
-  var PROBE_TIMEOUT = 15000;
+  // 等待对方同意 + 建连 + 探测的总时限：给对方足够时间点「接收」
+  var PROBE_TIMEOUT = 60000;
   var ICE_SERVERS = [{ urls: ['stun:stun.cloudflare.com:3478', 'stun:stun.l.google.com:19302'] }];
 
   function peerSignal(to, payload, toDevice) {
@@ -2747,6 +2796,10 @@
   function renderSendPhase() {
     var ps = state.peerSession;
     if (!ps || !el.sendBody) return;
+    if (ps.probeTick && ps.phase !== 'probing') {
+      clearInterval(ps.probeTick);
+      ps.probeTick = null;
+    }
     el.sendBody.textContent = '';
     var psRole = ps.role;
     var phase = ps.phase;
@@ -2793,7 +2846,15 @@
     } else if (phase === 'zipping') {
       sendProgressRow('正在打包…');
     } else if (phase === 'probing') {
-      hint('正在建立点对点连接并探测链路延迟…');
+      var probeHint = hint('正在等待对方同意并建立直连…');
+      ps._probeHint = probeHint;
+      ps._probeStart = Date.now();
+      if (ps.probeTick) clearInterval(ps.probeTick);
+      ps.probeTick = setInterval(function () {
+        if (state.peerSession !== ps) return clearInterval(ps.probeTick);
+        var sec = Math.round((Date.now() - ps._probeStart) / 1000);
+        probeHint.textContent = '正在等待对方同意并建立直连…（已等待 ' + sec + ' 秒，最长 ' + Math.round(PROBE_TIMEOUT / 1000) + ' 秒）';
+      }, 1000);
     } else if (phase === 'connecting') {
       hint('对方已同意接收，正在建立直连…');
     } else if (phase === 'transferring') {
@@ -2850,6 +2911,10 @@
     if (ps.probeTimer) {
       clearTimeout(ps.probeTimer);
       ps.probeTimer = null;
+    }
+    if (ps.probeTick) {
+      clearInterval(ps.probeTick);
+      ps.probeTick = null;
     }
     if (ps.rttTimer) {
       clearTimeout(ps.rttTimer);

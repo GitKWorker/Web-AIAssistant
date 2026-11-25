@@ -155,9 +155,9 @@ function makeFetch(log, role) {
         cursor: 0,
         online: 3,
         members: [
-          { username: 'admin', deviceName: 'jsdom', displayName: 'admin', lastSeen: Date.now() },
-          { username: '李雷', deviceName: 'MacBook', displayName: '李雷 · MacBook', lastSeen: Date.now() },
-          { username: '李雷', deviceName: 'iPhone', displayName: '李雷 · iPhone', lastSeen: Date.now() },
+          { username: 'admin', deviceName: 'jsdom', displayName: 'admin', ip: '192.168.8.10', lastSeen: Date.now() },
+          { username: '李雷', deviceName: 'MacBook', displayName: '李雷 · MacBook', ip: '192.168.6.55', lastSeen: Date.now() },
+          { username: '李雷', deviceName: 'iPhone', displayName: '李雷 · iPhone', ip: '', lastSeen: Date.now() },
         ],
       };
     } else if (u.indexOf('/api/files/sign') === 0) {
@@ -190,6 +190,10 @@ function makeFetch(log, role) {
       const body = JSON.parse((opts && opts.body) || '{}');
       (log.moves = log.moves || []).push(body);
       data = { ok: true, store: 'tmp', from: body.key, key: 's/归档/x/y.pdf', folder: body.folder };
+    } else if (u.split('?')[0] === '/api/files/rename-folder' && method === 'POST') {
+      const body = JSON.parse((opts && opts.body) || '{}');
+      (log.folderRenames = log.folderRenames || []).push(body);
+      data = { ok: true, store: body.store, from: body.path, path: body.newPath, copied: 2, deleted: 3 };
     } else if (u.split('?')[0] === '/api/files' && method === 'DELETE') {
       deletedKeys.add(decodeURIComponent((u.split('key=')[1] || '')));
       data = { ok: true, key: 's/a1/照片.png', name: '照片.png' };
@@ -691,6 +695,25 @@ function dropFile(win, doc, name, type, size) {
   await sleep(140);
   const deletes = F.calls.folderDeletes || [];
   ok('删除文件夹请求带完整路径', deletes.length === 1 && deletes[0] === '工作/2026', String(deletes));
+
+  // 重命名文件夹
+  const renRow = fRows().find((r) => r.classList.contains('is-folder') && r.textContent.indexOf('2026') >= 0);
+  ok('待重命名文件夹行存在', Boolean(renRow));
+  renRow.querySelector('[aria-label="重命名文件夹"]').click();
+  await sleep(40);
+  ok('重命名弹层打开且预填原名', F.doc.getElementById('fs-modal').hidden === false &&
+    F.doc.getElementById('fs-input').value === '2026',
+    F.doc.getElementById('fs-input').value);
+  F.doc.getElementById('fs-input').value = '2027';
+  F.doc.getElementById('fs-ok').click();
+  await sleep(140);
+  const renames = F.calls.folderRenames || [];
+  ok(
+    '重命名请求携带新旧路径',
+    renames.length === 1 && renames[0].path === '工作/2026' && renames[0].newPath === '工作/2027' && renames[0].store === 'tmp',
+    JSON.stringify(renames),
+  );
+  ok('重命名后弹层关闭', F.doc.getElementById('fs-modal').hidden === true);
   MOCK_TREE = false;
 
   /* ---------- 场景 13：右侧栏在线成员列表与发文件入口 ---------- */
@@ -704,6 +727,8 @@ function dropFile(win, doc, name, type, size) {
   const peerChip = Array.from(chips).find((c) => c.textContent.indexOf('MacBook') >= 0);
   ok('对方 chip 标题可发文件', Boolean(peerChip) && peerChip.getAttribute('title') === '给 李雷（MacBook）发文件');
   ok('在线人数徽标', A.doc.getElementById('rs-count').textContent === '3', A.doc.getElementById('rs-count').textContent);
+  ok('设备名附带 IP', peerChip.querySelector('.oc-dev').textContent.indexOf('192.168.6.55') >= 0,
+    peerChip.querySelector('.oc-dev').textContent);
   ok('退出登录按钮存在', Boolean(A.doc.getElementById('logout-btn')));
   peerChip.click();
   await sleep(40);

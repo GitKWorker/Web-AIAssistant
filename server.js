@@ -299,6 +299,7 @@ function publicMe(session) {
     deviceName: session.deviceName,
     displayName: session.displayName,
     deviceKey: session.deviceKey,
+    ip: session.ip || '',
   };
 }
 
@@ -946,6 +947,48 @@ async function handleFolderDelete(req, res, url) {
   return sendJson(res, 200, { ok: true, store, path: folder, deleted });
 }
 
+// 重命名文件夹（当前目录名，可含后续路径段的整体移动由 renameFolder 支持）
+async function handleFolderRename(req, res) {
+  let body;
+  try {
+    body = await readBody(req, 8 * 1024);
+  } catch (err) {
+    return fail(res, 400, 'INVALID_INPUT', err.message === 'BODY_TOO_LARGE' ? '请求体过大' : '请求格式错误');
+  }
+  const store = body.store === 'keep' ? 'keep' : 'tmp';
+  if (!r2.isConfigured(store)) {
+    return fail(res, 503, 'FILE_UPLOAD_DISABLED', '文件功能未启用');
+  }
+  let from = '';
+  let to = '';
+  try {
+    from = r2.normalizeFolder(body.path);
+    to = r2.normalizeFolder(body.newPath);
+  } catch (err) {
+    return fail(res, 400, 'INVALID_FOLDER', '文件夹名称无效（不能含 . 或 ..）');
+  }
+  if (!from || !to) {
+    return fail(res, 400, 'INVALID_FOLDER', '请填写新名称');
+  }
+  if (from === to) {
+    return sendJson(res, 200, { ok: true, store, path: to, copied: 0, deleted: 0 });
+  }
+  let result;
+  try {
+    result = await r2.renameFolder(store, from, to);
+  } catch (err) {
+    const msg = err.message || '';
+    if (msg === 'FOLDER_INTO_SELF') {
+      return fail(res, 400, 'INVALID_FOLDER', '不能把文件夹移到它自己的子目录里');
+    }
+    console.error('[files] 重命名文件夹失败：', msg);
+    return fail(res, 502, 'FOLDER_RENAME_FAILED', '重命名失败，请稍后重试');
+  }
+  fileListCache[store] = { at: 0, data: null };
+  console.log(`[files] 已重命名文件夹 ${store}:${from} -> ${to}，复制 ${result.copied} 个对象`);
+  return sendJson(res, 200, Object.assign({ ok: true, store, from }, result));
+}
+
 // 移动文件到指定文件夹（服务端 CopyObject + Delete，字节不过本机）
 async function handleFileMove(req, res) {
   let body;
@@ -1290,6 +1333,12 @@ async function handleApi(req, res, url) {
     const session = requireAdmin(req, res, '仅管理员可以管理文件夹');
     if (!session) return undefined;
     return handleFolderDelete(req, res, url);
+  }
+
+  if (route === 'POST /api/files/rename-folder') {
+    const session = requireAdmin(req, res, '仅管理员可以管理文件夹');
+    if (!session) return undefined;
+    return handleFolderRename(req, res);
   }
 
   if (route === 'POST /api/files/move') {
