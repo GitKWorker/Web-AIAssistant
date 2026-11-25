@@ -1210,6 +1210,9 @@ async function handlePeerSignal(req, res, session) {
   if (!delivered) {
     return fail(res, 404, 'USER_OFFLINE', '对方当前不在线');
   }
+  console.log(
+    `[peer] ${session.username}@${session.deviceName} -> ${target.username}${toDevice ? '@' + toDevice : '(全部设备)'} kind=${body.payload.kind || '?'} delivered=${delivered}`,
+  );
   if (rateLimited(`peer:${session.deviceKey}`)) {
     return fail(res, 429, 'RATE_LIMITED', '信令发送太频繁，请稍后再试');
   }

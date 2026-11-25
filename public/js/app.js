@@ -3006,7 +3006,20 @@
 
     ps.probeTimer = setTimeout(function () {
       if (state.peerSession === ps && ps.phase === 'probing') {
-        offerRelay('连接超时，对方无响应');
+        // 超时诊断：信令已送达对方但迟迟没建起直连，把 ICE/连接状态写进提示与控制台
+        var conn = '未知';
+        var ice = '未知';
+        try {
+          conn = ps.pc && ps.pc.connectionState ? ps.pc.connectionState : '无连接对象';
+          ice = ps.pc && ps.pc.iceConnectionState ? ps.pc.iceConnectionState : '无连接对象';
+        } catch (err) {
+          /* 忽略 */
+        }
+        console.log('[peer] 直传超时诊断：connectionState=' + conn + ' iceConnectionState=' + ice);
+        offerRelay(
+          '连接超时（' + Math.round(PROBE_TIMEOUT / 1000) + ' 秒）：对方 WebRTC ' + conn + ' / ICE ' + ice +
+          '。信令已送达但直连未建立——常见原因是两台设备被多层路由隔离（内网候选被浏览器 mDNS 匿名化、跨网段解析不了），或对方没有点「接收」',
+        );
       }
     }, PROBE_TIMEOUT);
 
@@ -3035,8 +3048,9 @@
     };
     pc.onconnectionstatechange = function () {
       if (state.peerSession !== ps) return;
+      console.log('[peer] 发送端 connectionState=' + pc.connectionState + ' iceConnectionState=' + pc.iceConnectionState);
       if (pc.connectionState === 'failed' && (ps.phase === 'probing' || ps.phase === 'connecting')) {
-        offerRelay('点对点连接失败（可能被多层路由隔离）');
+        offerRelay('点对点连接失败（ICE ' + pc.iceConnectionState + '）：可能被多层路由隔离，无法直连');
       }
     };
 
@@ -3321,6 +3335,7 @@
     var ps = state.peerSession;
 
     if (p.kind === 'offer') {
+      console.log('[peer] 收到 offer：来自 ' + data.from + '@' + (data.fromDevice || '?'));
       if (ps && ps.phase !== 'pick' && ps.phase !== 'relay' && ps.phase !== 'done' && ps.phase !== 'done-relay') {
         peerSignal(data.from, { kind: 'ctrl', t: 'busy' }, data.fromDevice).catch(function () {});
         return;
@@ -3444,6 +3459,10 @@
       return;
     }
     ps.pc = pc;
+    pc.onconnectionstatechange = function () {
+      if (state.peerSession !== ps) return;
+      console.log('[peer] 接收端 connectionState=' + pc.connectionState + ' iceConnectionState=' + pc.iceConnectionState);
+    };
     pc.onicecandidate = function (event) {
       if (event.candidate) {
         peerSignal(ps.target, { kind: 'cand', cand: event.candidate.toJSON() }, ps.targetDevice).catch(function () {});

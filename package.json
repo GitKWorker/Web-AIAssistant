@@ -1,6 +1,6 @@
 {
   "name": "ai-assistant",
-  "version": "1.7.4",
+  "version": "1.7.5",
   "private": true,
   "description": "AI 助手 · 轻量团队消息同步工具（纯 HTTP，零运行时依赖）",
   "main": "server.js",
