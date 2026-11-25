@@ -1080,13 +1080,11 @@ async function handleMessages(req, res, url, session) {
     return fail(res, 429, 'RATE_LIMITED', '发送太频繁了，请稍后再试');
   }
 
-  // 私发目标：只接受真实存在的账号，统一成规范用户名后入库
+  // 私发目标：只接受真实存在的账号，统一成规范用户名后入库。
+  // 允许发给自己：同一账号多台设备间传文件后要留记录（只有自己可见）。
   let to = '';
   const toRaw = String(body.to || '').trim();
   if (toRaw) {
-    if (toRaw.toLowerCase() === session.username.toLowerCase()) {
-      return fail(res, 400, 'INVALID_INPUT', '不能私发给自己');
-    }
     const target = accounts.findByUsername(toRaw);
     if (!target) {
       return fail(res, 404, 'NOT_FOUND', '目标用户不存在');
@@ -1129,7 +1127,10 @@ async function handlePeerSignal(req, res, session) {
   if (!toRaw) {
     return fail(res, 400, 'INVALID_INPUT', '缺少目标用户');
   }
-  if (toRaw.toLowerCase() === session.username.toLowerCase()) {
+  // 同账号也允许跨设备发信令（设备间直传），但必须明确指定目标设备，且不能指向自己这台
+  const sameUser = toRaw.toLowerCase() === session.username.toLowerCase();
+  const toDevice = String(body.toDevice || '').trim().slice(0, 40);
+  if (sameUser && (!toDevice || toDevice === session.deviceName)) {
     return fail(res, 400, 'INVALID_INPUT', '不能给自己发信令');
   }
   const target = accounts.findByUsername(toRaw);
@@ -1141,7 +1142,6 @@ async function handlePeerSignal(req, res, session) {
   }
   const targets = [];
   // 可选 toDevice：指定目标设备（同一账号多台设备各自独立）。缺省时投递给对方全部在线设备。
-  const toDevice = String(body.toDevice || '').trim().slice(0, 40);
   for (const client of streamClients) {
     if (client.username !== target.username) continue;
     if (toDevice && client.deviceName !== toDevice) continue;
