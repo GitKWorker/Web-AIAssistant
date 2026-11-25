@@ -2770,7 +2770,7 @@
     }
 
     if (phase === 'pick') {
-      hint('选择文件或整个文件夹。建立连接后自动探测延迟：同局域网（≤' + LAN_RTT_MS + 'ms）内点对点直传，文件不经过服务器；否则询问是否云盘中转。');
+      hint('选择文件或整个文件夹。建立连接后自动判定是否同一局域网：优先检查连接是否用内网地址直连（不依赖 ICMP ping，路由器禁 ping 不影响）；否则用延迟兜底（≤' + LAN_RTT_MS + 'ms）。同网直传不经过服务器，跨网询问是否云盘中转。');
       var row = document.createElement('div');
       row.className = 'send-actions';
       el.sendBody.appendChild(row);
@@ -2991,6 +2991,46 @@
       });
   }
 
+  // 读取 ICE 选中候选对的类型：host↔host = 双方用内网地址直接互通（同一网络，
+  // 且不依赖 ICMP——mDNS 候选本身穿不过路由器）；srflx/prflx/relay = 走了 NAT
+  // 打洞/中继，属于跨公网。读不到（老浏览器）返回 null，由 RTT 兕底。
+  function detectHostPair(pc) {
+    return new Promise(function (resolve) {
+      if (!pc || typeof pc.getStats !== 'function') return resolve(null);
+      var tries = 0;
+      (function poll() {
+        pc.getStats()
+          .then(function (report) {
+            var pair = null;
+            report.forEach(function (s) {
+              if (s.type !== 'candidate-pair' || s.state !== 'succeeded') return;
+              if (s.selected || s.nominated || (!pair && s.writable)) pair = s;
+            });
+            if (!pair) {
+              tries += 1;
+              if (tries >= 8) return resolve(null);
+              return setTimeout(poll, 300);
+            }
+            var localC = report.get(pair.localCandidateId);
+            var remoteC = report.get(pair.remoteCandidateId);
+            if (localC && remoteC) {
+              resolve({
+                local: localC.candidateType,
+                remote: remoteC.candidateType,
+                localAddr: localC.address || '',
+                remoteAddr: remoteC.address || '',
+              });
+            } else {
+              resolve(null);
+            }
+          })
+          .catch(function () {
+            resolve(null);
+          });
+      })();
+    });
+  }
+
   function peerChannelOpen(ps) {
     if (state.peerSession !== ps) return;
     try {
@@ -3041,37 +3081,65 @@
     }
   }
 
+  // 私网地址判断（RFC1918 + 环回）
+  function isPrivateIp(addr) {
+    return /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|127\.)/.test(String(addr || ''));
+  }
+
   function evaluateRtt(ps) {
     if (state.peerSession !== ps || ps.phase !== 'probing') return;
     if (ps.rttTimer) {
       clearTimeout(ps.rttTimer);
       ps.rttTimer = null;
     }
-    if (!ps.rttList.length) {
-      offerRelay('未收到对方延迟回应');
-      return;
-    }
-    var sorted = ps.rttList.slice().sort(function (a, b) { return a - b; });
-    var median = sorted[Math.floor(sorted.length / 2)];
-    if (median <= LAN_RTT_MS) {
-      ps.rtt = median;
-      ps.phase = 'transferring';
-      renderSendPhase();
-      try {
-        ps.dc.send(JSON.stringify({ t: 'start', rtt: median }));
-      } catch (err) {
-        offerRelay('传输启动失败');
+    detectHostPair(ps.pc).then(function (pair) {
+      if (state.peerSession !== ps || ps.phase !== 'probing') return;
+      var median = null;
+      if (ps.rttList.length) {
+        var sorted = ps.rttList.slice().sort(function (a, b) { return a - b; });
+        median = sorted[Math.floor(sorted.length / 2)];
+      }
+      // 判定顺序：① 候选对 host↔host 或双方都是私网地址 = 同网络（不依赖 ping）；
+      // ② 候选对读不到/走了公网地址 → RTT ≤ 10ms 兑底（兼顾同 NAT 跨网段打洞）；
+      // ③ 都不满足 = 跨网。
+      var lan = false;
+      var viaPair = false;
+      if (pair) {
+        viaPair = true;
+        var bothPrivate = isPrivateIp(pair.localAddr) && isPrivateIp(pair.remoteAddr);
+        if ((pair.local === 'host' && pair.remote === 'host') || bothPrivate) lan = true;
+      }
+      if (!lan && typeof median === 'number' && median <= LAN_RTT_MS) lan = true;
+      if (lan) {
+        startDcTransfer(ps, typeof median === 'number' ? median : 0);
         return;
       }
-      dcSendFile(ps);
-    } else {
       try {
         ps.dc.send(JSON.stringify({ t: 'abort', rtt: median }));
       } catch (err) {
         /* 忽略 */
       }
-      offerRelay('实测延迟 ' + median + 'ms（>' + LAN_RTT_MS + 'ms），不在同一局域网');
+      var detail = viaPair
+        ? '连接走的是公网地址（' + pair.local + ' ' + (pair.remoteAddr || '?') + '），不在同一局域网'
+        : typeof median === 'number'
+          ? '实测延迟 ' + median + 'ms（>' + LAN_RTT_MS + 'ms），不在同一局域网'
+          : '未能确认在同一局域网';
+      offerRelay(detail);
+    });
+  }
+
+  function startDcTransfer(ps, rtt) {
+    if (state.peerSession !== ps) return;
+    ps.rtt = rtt;
+    ps.phase = 'transferring';
+    renderSendPhase();
+    try {
+      ps.dc.send(JSON.stringify({ t: 'start', rtt: rtt }));
+    } catch (err) {
+      offerRelay('传输启动失败');
+      return;
     }
+    dcSendFile(ps);
   }
 
   function dcSendFile(ps) {
