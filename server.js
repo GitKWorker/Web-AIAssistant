@@ -1214,6 +1214,11 @@ async function handlePeerSignal(req, res, session) {
   console.log(
     `[peer] ${session.username}@${session.deviceName} -> ${target.username}${toDevice ? '@' + toDevice : '(全部设备)'} kind=${body.payload.kind || '?'} delivered=${delivered}`,
   );
+  // 直连诊断：记录每个 ICE 候选的类型与地址（mDNS 匿名化时是 xxx.local）
+  if (body.payload.kind === 'cand' && body.payload.cand) {
+    const cs = String(body.payload.cand.candidate || '');
+    console.log(`[peer-cand] ${session.username}@${session.deviceName} ${cs.slice(0, 140)}`);
+  }
   if (rateLimited(`peer:${session.deviceKey}`)) {
     return fail(res, 429, 'RATE_LIMITED', '信令发送太频繁，请稍后再试');
   }

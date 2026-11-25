@@ -3031,6 +3031,27 @@
       });
   }
 
+  function candSummary(pc) {
+    // 汇总双方 ICE 候选的类型与地址形态（被 mDNS 匿名化时地址是 xxx.local）
+    if (!pc || typeof pc.getStats !== 'function') return Promise.resolve('候选信息不可用');
+    return pc.getStats().then(function (stats) {
+      function collect(kind) {
+        var out = {};
+        stats.forEach(function (r) {
+          if (r.type !== kind) return;
+          var addr = String(r.address || r.ip || '');
+          var key = (r.candidateType || '?') + (addr.indexOf('.local') >= 0 ? '(mdns)' : addr ? '(' + addr + ')' : '');
+          out[key] = (out[key] || 0) + 1;
+        });
+        var keys = Object.keys(out);
+        return keys.length ? keys.join(' / ') : '无候选';
+      }
+      return '本机候选[' + collect('local-candidate') + '] 对方候选[' + collect('remote-candidate') + ']';
+    }).catch(function () {
+      return '候选信息不可用';
+    });
+  }
+
   function startProbe(blob, name, count) {
     var ps = state.peerSession;
     if (!ps || ps.role !== 'send') return;
@@ -3054,7 +3075,7 @@
 
     ps.probeTimer = setTimeout(function () {
       if (state.peerSession === ps && ps.phase === 'probing') {
-        // 超时诊断：信令已送达对方但迟迟没建起直连，把 ICE/连接状态写进提示与控制台
+        // 超时诊断：信令已送达对方但迟迟没建起直连，把 ICE/连接状态与候选摘要写进提示与控制台
         var conn = '未知';
         var ice = '未知';
         try {
@@ -3063,11 +3084,13 @@
         } catch (err) {
           /* 忽略 */
         }
-        console.log('[peer] 直传超时诊断：connectionState=' + conn + ' iceConnectionState=' + ice);
-        offerRelay(
-          '连接超时（' + Math.round(PROBE_TIMEOUT / 1000) + ' 秒）：对方 WebRTC ' + conn + ' / ICE ' + ice +
-          '。信令已送达但直连未建立——常见原因是两台设备被多层路由隔离（内网候选被浏览器 mDNS 匿名化、跨网段解析不了），或对方没有点「接收」',
-        );
+        candSummary(ps.pc).then(function (csum) {
+          console.log('[peer] 直传超时诊断：connectionState=' + conn + ' iceConnectionState=' + ice + ' ' + csum);
+          offerRelay(
+            '连接超时（' + Math.round(PROBE_TIMEOUT / 1000) + ' 秒）：ICE ' + ice + '。' + csum +
+            '。候选若为 (mdns) 多为路由器拦截组播；公司/公共网络则可能是设备隔离或禁 UDP；对方没点「接收」也会这样',
+          );
+        });
       }
     }, PROBE_TIMEOUT);
 
