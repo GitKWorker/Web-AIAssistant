@@ -69,6 +69,10 @@
     // 目录弹层：newfolder（新建文件夹）/ move（移动文件）
     fsMode: '',
     fsKey: '',
+    // 在线成员（服务器推名单，点头像发文件）
+    members: [],
+    // 点对点传文件会话：{ role:'send'|'recv', target, phase, pc, dc, blob, meta, ... }
+    peerSession: null,
   };
 
   var el = {};
@@ -192,6 +196,16 @@
     el.qrFile = $('qr-file');
     el.qrUrl = $('qr-url');
     el.qrCopy = $('qr-copy');
+    el.onlineChips = $('online-chips');
+    el.sendModal = $('send-modal');
+    el.sendMask = $('send-mask');
+    el.sendTitle = $('send-title');
+    el.sendBody = $('send-body');
+    el.sendOk = $('send-ok');
+    el.sendCancel = $('send-cancel');
+    el.sendClose = $('send-close');
+    el.sendFile = $('send-file');
+    el.sendFolder = $('send-folder');
   }
 
   /* ---------------- 通用 ---------------- */
@@ -480,6 +494,7 @@
         replaceMessages(data.messages || []);
         state.cursor = data.cursor || 0;
         updateOnline(data.online);
+        updateMembers(data.members);
         setConnected(true);
       })
       .catch(function (err) {
@@ -534,6 +549,7 @@
       setConnected(true);
       var data = parseEvent(event);
       if (data && typeof data.online === 'number') updateOnline(data.online);
+      if (data && data.members) updateMembers(data.members);
     });
 
     es.addEventListener('backlog', function (event) {
@@ -552,7 +568,13 @@
     es.addEventListener('online', function (event) {
       var data = parseEvent(event);
       if (data && typeof data.online === 'number') updateOnline(data.online);
+      if (data && data.members) updateMembers(data.members);
       if (!el.viewSettings.hidden && isAdmin()) loadUsers();
+    });
+
+    es.addEventListener('peer', function (event) {
+      var data = parseEvent(event);
+      if (data && data.payload) handlePeerSignal(data);
     });
 
     es.onerror = function () {
@@ -633,6 +655,7 @@
           more = data.messages.length >= state.displayLimit;
         }
         updateOnline(data.online);
+        updateMembers(data.members);
         setConnected(true);
       })
       .catch(function (err) {
@@ -734,6 +757,13 @@
 
     head.appendChild(name);
     head.appendChild(device);
+    // 私发消息标记：只有双方能看到这条
+    if (message.to) {
+      var tag = document.createElement('span');
+      tag.className = 'msg-private';
+      tag.textContent = message.username === (state.me && state.me.username) ? '私发·' + message.to : '私发';
+      head.appendChild(tag);
+    }
     head.appendChild(time);
 
     var text = document.createElement('div');
@@ -2459,6 +2489,938 @@
     showLogin('已退出登录');
   }
 
+  /* ---------------- 在线成员列表 ---------------- */
+
+  function updateMembers(list) {
+    state.members = Array.isArray(list) ? list : [];
+    renderOnlineChips();
+  }
+
+  // 同一用户多台设备合并为一个头像块；点别人 = 发文件
+  function renderOnlineChips() {
+    if (!el.onlineChips) return;
+    el.onlineChips.textContent = '';
+    var map = new Map();
+    state.members.forEach(function (m) {
+      if (!m || !m.username) return;
+      var entry = map.get(m.username);
+      if (!entry) {
+        entry = { username: m.username, devices: [] };
+        map.set(m.username, entry);
+      }
+      entry.devices.push(m.deviceName || 'Web');
+    });
+    var me = state.me && state.me.username;
+    if (!map.size) {
+      var empty = document.createElement('span');
+      empty.className = 'online-empty';
+      empty.textContent = '暂无在线成员';
+      el.onlineChips.appendChild(empty);
+      return;
+    }
+    map.forEach(function (entry) {
+      var chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'online-chip';
+      var isSelf = me && entry.username === me;
+      if (isSelf) chip.classList.add('is-self');
+
+      var avatar = document.createElement('span');
+      avatar.className = 'oc-avatar';
+      avatar.textContent = firstChar(entry.username);
+
+      var texts = document.createElement('span');
+      texts.className = 'oc-text';
+      var name = document.createElement('span');
+      name.className = 'oc-name';
+      name.textContent = entry.username + (isSelf ? '（我）' : '');
+      var dev = document.createElement('span');
+      dev.className = 'oc-dev';
+      dev.textContent = entry.devices.join(' / ');
+      texts.appendChild(name);
+      texts.appendChild(dev);
+
+      chip.appendChild(avatar);
+      chip.appendChild(texts);
+      if (!isSelf) {
+        chip.title = '给 ' + entry.username + ' 发文件';
+        chip.addEventListener('click', function () {
+          openSendModal(entry.username);
+        });
+      }
+      el.onlineChips.appendChild(chip);
+    });
+  }
+
+  /* ---------------- 客户端 zip 打包（仅存储不压缩，文件夹/多文件发送用） ---------------- */
+
+  var CRC_TABLE = (function () {
+    var table = new Uint32Array(256);
+    for (var i = 0; i < 256; i += 1) {
+      var c = i;
+      for (var k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      table[i] = c >>> 0;
+    }
+    return table;
+  })();
+
+  function crc32Update(crc, buf) {
+    var table = CRC_TABLE;
+    var c = crc ^ 0xffffffff;
+    for (var i = 0; i < buf.length; i += 1) c = table[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  }
+
+  function dosDateTime(ts) {
+    var d = new Date(ts || Date.now());
+    var time = ((d.getHours() & 31) << 11) | ((d.getMinutes() & 63) << 5) | (Math.floor(d.getSeconds() / 2) & 31);
+    var date = (((d.getFullYear() - 1980) & 127) << 9) | (((d.getMonth() + 1) & 15) << 5) | (d.getDate() & 31);
+    return { time: time, date: date };
+  }
+
+  // entries: [{ name: '目录/文件.txt', file: File }] → Blob(zip)。
+  // 文件数据块以 Blob 引用拼接，不整包读进内存；逐块算 CRC。
+  function buildZip(entries, onProgress) {
+    return new Promise(function (resolve, reject) {
+      var encoder = new TextEncoder();
+      var totalBytes = entries.reduce(function (sum, e) { return sum + e.file.size; }, 0);
+      if (totalBytes > 4 * 1024 * 1024 * 1024) {
+        reject(new Error('文件夹总大小超过 4GB，无法打包'));
+        return;
+      }
+      var parts = [];
+      var offsets = [];
+      var records = [];
+      var offset = 0;
+      var index = 0;
+      var CHUNK = 4 * 1024 * 1024;
+
+      function next() {
+        if (index >= entries.length) {
+          finish();
+          return;
+        }
+        var entry = entries[index];
+        var nameBytes = encoder.encode(entry.name);
+        var dt = dosDateTime(entry.file.lastModified);
+        var size = entry.file.size;
+        var crc = 0;
+        var done = 0;
+
+        function readChunk() {
+          if (done >= size) {
+            var local = new DataView(new ArrayBuffer(30));
+            local.setUint32(0, 0x04034b50, true);
+            local.setUint16(4, 20, true);
+            local.setUint16(6, 0x0800, true); // UTF-8 文件名
+            local.setUint16(8, 0, true); // store 不压缩
+            local.setUint16(10, dt.time, true);
+            local.setUint16(12, dt.date, true);
+            local.setUint32(14, crc, true);
+            local.setUint32(18, size, true);
+            local.setUint32(22, size, true);
+            local.setUint16(26, nameBytes.length, true);
+            local.setUint16(28, 0, true);
+            offsets.push(offset);
+            parts.push(new Blob([local.buffer, nameBytes]));
+            offset += 30 + nameBytes.length + size;
+            records.push({ nameBytes: nameBytes, crc: crc, size: size, dt: dt });
+            index += 1;
+            if (typeof onProgress === 'function') {
+              onProgress(Math.min(0.95, (totalBytes ? offset : 1) / (totalBytes + 1)));
+            }
+            setTimeout(next, 0);
+            return;
+          }
+          var end = Math.min(done + CHUNK, size);
+          entry.file
+            .slice(done, end)
+            .arrayBuffer()
+            .then(function (buf) {
+              crc = crc32Update(crc, new Uint8Array(buf));
+              parts.push(entry.file.slice(done, end));
+              done = end;
+              readChunk();
+            }, reject);
+        }
+        readChunk();
+      }
+
+      function finish() {
+        var cdStart = offset;
+        records.forEach(function (rec, idx) {
+          var cd = new DataView(new ArrayBuffer(46));
+          cd.setUint32(0, 0x02014b50, true);
+          cd.setUint16(4, 20, true);
+          cd.setUint16(6, 20, true);
+          cd.setUint16(8, 0x0800, true);
+          cd.setUint16(12, rec.dt.time, true);
+          cd.setUint16(14, rec.dt.date, true);
+          cd.setUint32(16, rec.crc, true);
+          cd.setUint32(20, rec.size, true);
+          cd.setUint32(24, rec.size, true);
+          cd.setUint16(28, rec.nameBytes.length, true);
+          cd.setUint32(42, offsets[idx], true);
+          parts.push(new Blob([cd.buffer, rec.nameBytes]));
+          offset += 46 + rec.nameBytes.length;
+        });
+        var eocd = new DataView(new ArrayBuffer(22));
+        eocd.setUint32(0, 0x06054b50, true);
+        eocd.setUint16(8, records.length, true);
+        eocd.setUint16(10, records.length, true);
+        eocd.setUint32(12, offset - cdStart, true);
+        eocd.setUint32(16, cdStart, true);
+        parts.push(new Blob([eocd.buffer]));
+        if (typeof onProgress === 'function') onProgress(1);
+        resolve(new Blob(parts, { type: 'application/zip' }));
+      }
+
+      next();
+    });
+  }
+
+  /* ---------------- 点对点传文件（WebRTC 直传，文件不经过服务器） ---------------- */
+
+  var PEER_CHUNK = 16 * 1024;
+  var PEER_HIGH = 4 * 1024 * 1024;
+  var PEER_LOW = 1 * 1024 * 1024;
+  var LAN_RTT_MS = 10;
+  var PROBE_TIMEOUT = 15000;
+  var ICE_SERVERS = [{ urls: ['stun:stun.cloudflare.com:3478', 'stun:stun.l.google.com:19302'] }];
+
+  function peerSignal(to, payload) {
+    return api('POST', '/api/peer/signal', { to: to, payload: payload });
+  }
+
+  function openSendModal(username) {
+    state.peerSession = { role: 'send', target: username, phase: 'pick', meta: null, blob: null };
+    el.sendTitle.textContent = '发送文件给 ' + username;
+    el.sendOk.hidden = true;
+    el.sendCancel.hidden = false;
+    el.sendCancel.textContent = '取消';
+    renderSendPhase();
+    el.sendModal.hidden = false;
+  }
+
+  function sendProgressRow(label) {
+    var row = document.createElement('div');
+    row.className = 'p-row';
+    var text = document.createElement('div');
+    text.className = 'p-label';
+    text.textContent = label || '';
+    var line = document.createElement('div');
+    line.className = 'p-line';
+    var bar = document.createElement('div');
+    bar.className = 'p-bar';
+    var fill = document.createElement('div');
+    fill.className = 'p-fill';
+    fill.style.width = '0%';
+    bar.appendChild(fill);
+    var pct = document.createElement('span');
+    pct.className = 'p-pct';
+    pct.textContent = '0%';
+    line.appendChild(bar);
+    line.appendChild(pct);
+    row.appendChild(text);
+    row.appendChild(line);
+    var ps = state.peerSession;
+    if (ps) {
+      ps._fill = fill;
+      ps._pct = pct;
+      ps._label = text;
+    }
+    return row;
+  }
+
+  function setSendProgress(ratio, label) {
+    var ps = state.peerSession;
+    if (!ps || !ps._fill) return;
+    var p = Math.max(0, Math.min(1, ratio || 0));
+    ps._fill.style.width = (p * 100).toFixed(1) + '%';
+    if (ps._pct) ps._pct.textContent = Math.round(p * 100) + '%';
+    if (label && ps._label) ps._label.textContent = label;
+  }
+
+  function renderSendPhase() {
+    var ps = state.peerSession;
+    if (!ps || !el.sendBody) return;
+    el.sendBody.textContent = '';
+    var psRole = ps.role;
+    var phase = ps.phase;
+
+    function hint(text) {
+      var div = document.createElement('div');
+      div.className = 'fs-hint';
+      div.textContent = text;
+      el.sendBody.appendChild(div);
+      return div;
+    }
+
+    function actionButton(text, handler, primary) {
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = primary ? 'btn-primary btn-auto' : 'btn-ghost';
+      btn.textContent = text;
+      btn.addEventListener('click', handler);
+      el.sendBody.appendChild(btn);
+      return btn;
+    }
+
+    if (phase === 'pick') {
+      hint('选择文件或整个文件夹。建立连接后自动探测延迟：同局域网（≤' + LAN_RTT_MS + 'ms）内点对点直传，文件不经过服务器；否则询问是否云盘中转。');
+      var row = document.createElement('div');
+      row.className = 'send-actions';
+      el.sendBody.appendChild(row);
+      var pickFile = document.createElement('button');
+      pickFile.type = 'button';
+      pickFile.className = 'btn-ghost';
+      pickFile.textContent = '选择文件';
+      pickFile.addEventListener('click', function () {
+        el.sendFile.click();
+      });
+      var pickFolder = document.createElement('button');
+      pickFolder.type = 'button';
+      pickFolder.className = 'btn-ghost';
+      pickFolder.textContent = '选择文件夹';
+      pickFolder.addEventListener('click', function () {
+        el.sendFolder.click();
+      });
+      row.appendChild(pickFile);
+      row.appendChild(pickFolder);
+    } else if (phase === 'zipping') {
+      sendProgressRow('正在打包…');
+    } else if (phase === 'probing') {
+      hint('正在建立点对点连接并探测链路延迟…');
+    } else if (phase === 'connecting') {
+      hint('对方已同意接收，正在建立直连…');
+    } else if (phase === 'transferring') {
+      sendProgressRow(psRole === 'recv' ? '接收中' : '局域网直传中');
+    } else if (phase === 'uploading') {
+      sendProgressRow('云盘中转上传中');
+    } else if (phase === 'relay') {
+      hint('直传不可用：' + (ps.reason || '与对方不在同一局域网') + '。');
+      hint('同意后文件将上传到云盘中转（7 天自动过期），对方从云端下载。');
+    } else if (phase === 'incoming') {
+      hint(
+        (ps.target || '对方') + '（' + (ps.fromDevice || 'Web') + '）想给你发送文件，接收后通过局域网点对点直传，文件不经过服务器：'
+      );
+      var info = document.createElement('div');
+      info.className = 'p-fileinfo';
+      info.textContent = ps.meta && ps.meta.name ? ps.meta.name + '（' + fmtSize(ps.meta.size) + (ps.meta.count > 1 ? '，' + ps.meta.count + ' 个文件打包' : '') + '）' : '未知文件';
+      el.sendBody.appendChild(info);
+    } else if (phase === 'done') {
+      hint('✓ 传输完成');
+    } else if (phase === 'done-relay') {
+      hint('✓ 已通过云盘中转，等对方下载');
+    }
+  }
+
+  function onSendOk() {
+    var ps = state.peerSession;
+    if (!ps) return;
+    if (ps.phase === 'incoming') acceptIncoming();
+    else if (ps.phase === 'relay') doRelay();
+  }
+
+  function onSendCancel() {
+    var ps = state.peerSession;
+    if (!ps) return closeSendModal();
+    if (ps.phase === 'incoming') {
+      declineIncoming();
+      return;
+    }
+    if (ps.phase === 'transferring' || ps.phase === 'probing' || ps.phase === 'connecting') {
+      // 中途取消：通知对方
+      peerSignal(ps.target, { kind: 'ctrl', t: 'cancel' }).catch(function () {});
+    }
+    closeSendModal();
+  }
+
+  function closeSendModal() {
+    var ps = state.peerSession;
+    if (ps) cleanupPeerSession(ps);
+    state.peerSession = null;
+    if (el.sendModal) el.sendModal.hidden = true;
+  }
+
+  function cleanupPeerSession(ps) {
+    if (ps.probeTimer) {
+      clearTimeout(ps.probeTimer);
+      ps.probeTimer = null;
+    }
+    if (ps.rttTimer) {
+      clearTimeout(ps.rttTimer);
+      ps.rttTimer = null;
+    }
+    if (ps.dc) {
+      try {
+        ps.dc.close();
+      } catch (err) {
+        /* 忽略 */
+      }
+      ps.dc = null;
+    }
+    if (ps.pc) {
+      try {
+        ps.pc.close();
+      } catch (err) {
+        /* 忽略 */
+      }
+      ps.pc = null;
+    }
+    if (ps.writer) {
+      try {
+        ps.writer.close();
+      } catch (err) {
+        /* 忽略 */
+      }
+      ps.writer = null;
+    }
+  }
+
+  function prepareSend(fileList, isFolder) {
+    var ps = state.peerSession;
+    if (!ps || ps.role !== 'send') return;
+    var files = Array.prototype.slice.call(fileList || []);
+    if (!files.length) return;
+
+    if (files.length === 1 && !isFolder) {
+      startProbe(files[0], files[0].name, 1);
+      return;
+    }
+
+    var baseName = 'files.zip';
+    var rel0 = files[0].webkitRelativePath || '';
+    if (isFolder && rel0 && rel0.indexOf('/') > 0) {
+      baseName = rel0.split('/')[0] + '.zip';
+    }
+    ps.phase = 'zipping';
+    el.sendOk.hidden = true;
+    renderSendPhase();
+
+    var entries = files.map(function (f) {
+      return { name: f.webkitRelativePath || f.name, file: f };
+    });
+    buildZip(entries, function (ratio) {
+      setSendProgress(ratio, '正在打包 ' + files.length + ' 个文件…');
+    })
+      .then(function (blob) {
+        if (state.peerSession !== ps) return;
+        startProbe(blob, baseName, files.length);
+      })
+      .catch(function (err) {
+        toast(err.message || '打包失败');
+        ps.phase = 'pick';
+        renderSendPhase();
+      });
+  }
+
+  function startProbe(blob, name, count) {
+    var ps = state.peerSession;
+    if (!ps || ps.role !== 'send') return;
+    ps.blob = blob;
+    ps.meta = { name: name, size: blob.size, count: count };
+
+    if (!window.RTCPeerConnection) {
+      offerRelay('当前浏览器不支持点对点直传');
+      return;
+    }
+    if (!state.sseOk) {
+      offerRelay('当前未建立实时通道，无法完成直连握手');
+      return;
+    }
+
+    ps.phase = 'probing';
+    ps.rttList = [];
+    ps.pendingCands = [];
+    el.sendOk.hidden = true;
+    renderSendPhase();
+
+    ps.probeTimer = setTimeout(function () {
+      if (state.peerSession === ps && ps.phase === 'probing') {
+        offerRelay('连接超时，对方无响应');
+      }
+    }, PROBE_TIMEOUT);
+
+    var pc;
+    try {
+      pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    } catch (err) {
+      offerRelay('创建点对点连接失败');
+      return;
+    }
+    ps.pc = pc;
+    var dc = pc.createDataChannel('file', { ordered: true });
+    ps.dc = dc;
+    dc.binaryType = 'arraybuffer';
+    dc.onopen = function () {
+      peerChannelOpen(ps);
+    };
+    dc.onmessage = function (event) {
+      senderOnMessage(ps, event.data);
+    };
+
+    pc.onicecandidate = function (event) {
+      if (event.candidate) {
+        peerSignal(ps.target, { kind: 'cand', cand: event.candidate.toJSON() }).catch(function () {});
+      }
+    };
+    pc.onconnectionstatechange = function () {
+      if (state.peerSession !== ps) return;
+      if (pc.connectionState === 'failed' && (ps.phase === 'probing' || ps.phase === 'connecting')) {
+        offerRelay('点对点连接失败（可能被多层路由隔离）');
+      }
+    };
+
+    pc.createOffer()
+      .then(function (offer) {
+        return pc.setLocalDescription(offer);
+      })
+      .then(function () {
+        peerSignal(ps.target, { kind: 'offer', sdp: ps.pc.localDescription.toJSON(), meta: ps.meta }).catch(function (err) {
+          if (state.peerSession === ps && ps.phase === 'probing') {
+            offerRelay(err && err.message ? err.message : '信令发送失败');
+          }
+        });
+      })
+      .catch(function () {
+        if (state.peerSession === ps && ps.phase === 'probing') offerRelay('创建点对点连接失败');
+      });
+  }
+
+  function peerChannelOpen(ps) {
+    if (state.peerSession !== ps) return;
+    try {
+      ps.dc.send(JSON.stringify({ t: 'meta', name: ps.meta.name, size: ps.meta.size, count: ps.meta.count }));
+    } catch (err) {
+      /* 忽略 */
+    }
+    ps.rttList = [];
+    for (var i = 0; i < 5; i += 1) {
+      (function (n) {
+        setTimeout(function () {
+          if (state.peerSession === ps && ps.dc && ps.dc.readyState === 'open') {
+            try {
+              ps.dc.send(JSON.stringify({ t: 'ping', n: n, ts: Date.now() }));
+            } catch (err) {
+              /* 忽略 */
+            }
+          }
+        }, n * 120);
+      })(i);
+    }
+    ps.rttTimer = setTimeout(function () {
+      evaluateRtt(ps);
+    }, 5 * 120 + 1200);
+  }
+
+  function senderOnMessage(ps, data) {
+    if (state.peerSession !== ps || typeof data !== 'string') return;
+    var msg;
+    try {
+      msg = JSON.parse(data);
+    } catch (err) {
+      return;
+    }
+    if (msg.t === 'pong' && typeof msg.ts === 'number') {
+      ps.rttList.push(Date.now() - msg.ts);
+      if (ps.rttList.length >= 5 && ps.rttTimer) {
+        clearTimeout(ps.rttTimer);
+        ps.rttTimer = null;
+        evaluateRtt(ps);
+      }
+    } else if (msg.t === 'decline') {
+      closeSendModal();
+      toast('对方拒绝了接收');
+    } else if (msg.t === 'cancel') {
+      closeSendModal();
+      toast('对方取消了接收');
+    }
+  }
+
+  function evaluateRtt(ps) {
+    if (state.peerSession !== ps || ps.phase !== 'probing') return;
+    if (ps.rttTimer) {
+      clearTimeout(ps.rttTimer);
+      ps.rttTimer = null;
+    }
+    if (!ps.rttList.length) {
+      offerRelay('未收到对方延迟回应');
+      return;
+    }
+    var sorted = ps.rttList.slice().sort(function (a, b) { return a - b; });
+    var median = sorted[Math.floor(sorted.length / 2)];
+    if (median <= LAN_RTT_MS) {
+      ps.rtt = median;
+      ps.phase = 'transferring';
+      renderSendPhase();
+      try {
+        ps.dc.send(JSON.stringify({ t: 'start', rtt: median }));
+      } catch (err) {
+        offerRelay('传输启动失败');
+        return;
+      }
+      dcSendFile(ps);
+    } else {
+      try {
+        ps.dc.send(JSON.stringify({ t: 'abort', rtt: median }));
+      } catch (err) {
+        /* 忽略 */
+      }
+      offerRelay('实测延迟 ' + median + 'ms（>' + LAN_RTT_MS + 'ms），不在同一局域网');
+    }
+  }
+
+  function dcSendFile(ps) {
+    var blob = ps.blob;
+    var dc = ps.dc;
+    var offset = 0;
+    dc.bufferedAmountLowThreshold = PEER_LOW;
+
+    function pump() {
+      if (state.peerSession !== ps || ps.phase !== 'transferring') return;
+      try {
+        while (offset < blob.size && dc.bufferedAmount < PEER_HIGH) {
+          var end = Math.min(offset + PEER_CHUNK, blob.size);
+          dc.send(blob.slice(offset, end));
+          offset = end;
+        }
+      } catch (err) {
+        toast('传输中断：' + (err.message || '未知错误'));
+        closeSendModal();
+        return;
+      }
+      setSendProgress(blob.size ? offset / blob.size : 1);
+      if (offset >= blob.size) {
+        finishSend(ps);
+        return;
+      }
+    }
+
+    dc.addEventListener('bufferedamountlow', pump);
+    pump();
+  }
+
+  function finishSend(ps) {
+    if (state.peerSession !== ps) return;
+    try {
+      ps.dc.send(JSON.stringify({ t: 'end' }));
+    } catch (err) {
+      /* 忽略 */
+    }
+    ps.phase = 'done';
+    renderSendPhase();
+    // 留一条私发记录（只有双方可见），文件本体不经过服务器
+    api('POST', '/api/messages', {
+      content: '已通过局域网直传「' + (ps.meta && ps.meta.name ? ps.meta.name : '文件') + '」（' + fmtSize(ps.meta.size) + '）',
+      clientMsgId: uuid(),
+      to: ps.target,
+    })
+      .then(function (data) {
+        if (data.message) appendMessages([data.message]);
+      })
+      .catch(function () {});
+    setTimeout(function () {
+      if (state.peerSession === ps) closeSendModal();
+    }, 1200);
+  }
+
+  function offerRelay(reason) {
+    var ps = state.peerSession;
+    if (!ps) return;
+    cleanupPeerSession(ps);
+    ps.pc = null;
+    ps.dc = null;
+    ps.phase = 'relay';
+    ps.reason = reason;
+    el.sendTitle.textContent = '发送文件给 ' + ps.target;
+    el.sendOk.hidden = false;
+    el.sendOk.textContent = '同意中转';
+    el.sendCancel.hidden = false;
+    el.sendCancel.textContent = '取消';
+    renderSendPhase();
+  }
+
+  function doRelay() {
+    var ps = state.peerSession;
+    if (!ps || !ps.blob) return;
+    ps.phase = 'uploading';
+    el.sendOk.hidden = true;
+    renderSendPhase();
+    var file = ps.blob instanceof File ? ps.blob : new File([ps.blob], ps.meta.name, { type: 'application/zip' });
+    uploadToR2(file, 'chat', function (ratio) {
+      setSendProgress(ratio);
+    })
+      .then(function (meta) {
+        return api('POST', '/api/messages', {
+          content: '已通过云盘中转「' + meta.name + '」（' + fmtSize(meta.size) + '）',
+          clientMsgId: uuid(),
+          file: meta,
+          to: ps.target,
+        });
+      })
+      .then(function (data) {
+        if (state.peerSession !== ps) return;
+        if (data.message) appendMessages([data.message]);
+        ps.phase = 'done-relay';
+        renderSendPhase();
+        setTimeout(function () {
+          if (state.peerSession === ps) closeSendModal();
+        }, 1200);
+      })
+      .catch(function (err) {
+        if (err.status === 401) return;
+        if (state.peerSession !== ps) return;
+        ps.phase = 'relay';
+        ps.reason = (err && err.message) || '云盘中转上传失败';
+        el.sendOk.hidden = false;
+        renderSendPhase();
+      });
+  }
+
+  /* ---------------- 接收端 ---------------- */
+
+  function handlePeerSignal(data) {
+    var p = data.payload || {};
+    var ps = state.peerSession;
+
+    if (p.kind === 'offer') {
+      if (ps && ps.phase !== 'pick' && ps.phase !== 'relay' && ps.phase !== 'done' && ps.phase !== 'done-relay') {
+        peerSignal(data.from, { kind: 'ctrl', t: 'busy' }).catch(function () {});
+        return;
+      }
+      if (ps) cleanupPeerSession(ps);
+      state.peerSession = {
+        role: 'recv',
+        target: data.from,
+        fromDevice: data.fromDevice || 'Web',
+        phase: 'incoming',
+        meta: p.meta || { name: '文件', size: 0, count: 1 },
+        offer: p.sdp,
+        pc: null,
+        dc: null,
+        writer: null,
+        chunks: [],
+        received: 0,
+        pendingCands: [],
+      };
+      el.sendTitle.textContent = data.from + ' 请求发送文件';
+      el.sendOk.hidden = false;
+      el.sendOk.textContent = '接收';
+      el.sendCancel.hidden = false;
+      el.sendCancel.textContent = '拒绝';
+      renderSendPhase();
+      el.sendModal.hidden = false;
+      return;
+    }
+
+    if (!ps || ps.target !== data.from) return; // 非本会话的信号直接丢弃
+
+    if (p.kind === 'answer' && ps.role === 'send' && ps.pc) {
+      ps.pc
+        .setRemoteDescription(p.sdp)
+        .then(function () {
+          (ps.pendingCands || []).forEach(function (cand) {
+            try {
+              ps.pc.addIceCandidate(cand).catch(function () {});
+            } catch (err) {
+              /* 忽略 */
+            }
+          });
+          ps.pendingCands = null;
+        })
+        .catch(function () {});
+      return;
+    }
+    if (p.kind === 'cand' && ps.pc && p.cand) {
+      if (ps.pc.remoteDescription) {
+        try {
+          ps.pc.addIceCandidate(p.cand).catch(function () {});
+        } catch (err) {
+          /* 忽略 */
+        }
+      } else if (ps.pendingCands) {
+        ps.pendingCands.push(p.cand);
+      }
+      return;
+    }
+    if (p.kind === 'ctrl') {
+      if (p.t === 'busy') {
+        closeSendModal();
+        toast('对方正忙，请稍后再试');
+      } else if (p.t === 'decline') {
+        closeSendModal();
+        toast('对方拒绝了接收');
+      } else if (p.t === 'cancel') {
+        closeSendModal();
+        toast('对方取消了传输');
+      }
+    }
+  }
+
+  function acceptIncoming() {
+    var ps = state.peerSession;
+    if (!ps || ps.role !== 'recv' || ps.accepting) return;
+    ps.accepting = true;
+
+    var proceed = function (writer) {
+      ps.writer = writer || null;
+      answerPeer(ps);
+    };
+
+    // 优先让用户选保存位置并流式写盘（大文件不吃内存）；取消选择视为拒绝
+    if (window.showSaveFilePicker) {
+      window.showSaveFilePicker({ suggestedName: ps.meta.name || 'file' })
+        .then(function (handle) {
+          return handle.createWritable().then(function (w) {
+            proceed(w);
+          });
+        })
+        .catch(function (err) {
+          if (err && err.name === 'AbortError') {
+            declineIncoming();
+            return;
+          }
+          proceed(null);
+        });
+      return;
+    }
+    proceed(null);
+  }
+
+  function declineIncoming() {
+    var ps = state.peerSession;
+    if (ps) peerSignal(ps.target, { kind: 'ctrl', t: 'decline' }).catch(function () {});
+    closeSendModal();
+  }
+
+  function answerPeer(ps) {
+    ps.phase = 'connecting';
+    el.sendOk.hidden = true;
+    renderSendPhase();
+    var pc;
+    try {
+      pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    } catch (err) {
+      closeSendModal();
+      toast('创建点对点连接失败');
+      return;
+    }
+    ps.pc = pc;
+    pc.onicecandidate = function (event) {
+      if (event.candidate) {
+        peerSignal(ps.target, { kind: 'cand', cand: event.candidate.toJSON() }).catch(function () {});
+      }
+    };
+    pc.ondatachannel = function (event) {
+      var dc = event.channel;
+      ps.dc = dc;
+      dc.binaryType = 'arraybuffer';
+      dc.onmessage = function (ev) {
+        receiverOnMessage(ps, ev.data);
+      };
+      dc.onclose = function () {
+        if (state.peerSession === ps && ps.phase === 'transferring') {
+          closeSendModal();
+          toast('传输中断');
+        }
+      };
+    };
+    pc.setRemoteDescription(ps.offer)
+      .then(function () {
+        return pc.createAnswer();
+      })
+      .then(function (answer) {
+        return pc.setLocalDescription(answer);
+      })
+      .then(function () {
+        peerSignal(ps.target, { kind: 'answer', sdp: ps.pc.localDescription.toJSON() }).catch(function () {});
+        (ps.pendingCands || []).forEach(function (cand) {
+          try {
+            pc.addIceCandidate(cand).catch(function () {});
+          } catch (err) {
+            /* 忽略 */
+          }
+        });
+        ps.pendingCands = null;
+      })
+      .catch(function () {
+        closeSendModal();
+        toast('直连握手失败');
+      });
+  }
+
+  function receiverOnMessage(ps, data) {
+    if (state.peerSession !== ps) return;
+    if (typeof data === 'string') {
+      var msg;
+      try {
+        msg = JSON.parse(data);
+      } catch (err) {
+        return;
+      }
+      if (msg.t === 'start') {
+        ps.phase = 'transferring';
+        renderSendPhase();
+      } else if (msg.t === 'ping') {
+        // 回应发送方的链路探测：原样带时间戳回 pong
+        try {
+          ps.dc.send(JSON.stringify({ t: 'pong', n: msg.n, ts: msg.ts }));
+        } catch (err) {
+          /* 忽略 */
+        }
+      } else if (msg.t === 'end') {
+        finishIncoming(ps);
+      } else if (msg.t === 'abort') {
+        closeSendModal();
+        toast('对方不在同一局域网，改走了云盘中转');
+      } else if (msg.t === 'cancel') {
+        closeSendModal();
+        toast('对方取消了发送');
+      }
+      return;
+    }
+    var buf = data instanceof ArrayBuffer ? data : null;
+    if (!buf) return;
+    ps.received += buf.byteLength;
+    if (ps.writer) {
+      ps.writer.write(buf).catch(function () {});
+    } else {
+      ps.chunks.push(buf);
+    }
+    if (ps.meta && ps.meta.size) setSendProgress(ps.received / ps.meta.size);
+  }
+
+  function finishIncoming(ps) {
+    if (state.peerSession !== ps) return;
+    var done = function () {
+      ps.phase = 'done';
+      renderSendPhase();
+      toast('已接收 ' + (ps.meta && ps.meta.name ? ps.meta.name : '文件'));
+      setTimeout(function () {
+        if (state.peerSession === ps) closeSendModal();
+      }, 1200);
+    };
+    if (ps.writer) {
+      ps.writer.close().then(done, done);
+      ps.writer = null;
+      return;
+    }
+    var blob = new Blob(ps.chunks, { type: 'application/octet-stream' });
+    ps.chunks = [];
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = (ps.meta && ps.meta.name) || 'file';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () {
+      URL.revokeObjectURL(url);
+    }, 10000);
+    done();
+  }
+
   /* ---------------- 事件绑定 ---------------- */
 
   function bindEvents() {
@@ -2595,6 +3557,19 @@
       }
     });
 
+    el.sendOk.addEventListener('click', onSendOk);
+    el.sendCancel.addEventListener('click', onSendCancel);
+    el.sendClose.addEventListener('click', closeSendModal);
+    el.sendMask.addEventListener('click', closeSendModal);
+    el.sendFile.addEventListener('change', function () {
+      prepareSend(el.sendFile.files, false);
+      el.sendFile.value = '';
+    });
+    el.sendFolder.addEventListener('change', function () {
+      prepareSend(el.sendFolder.files, true);
+      el.sendFolder.value = '';
+    });
+
     el.previewClose.addEventListener('click', closePreview);
     el.previewMask.addEventListener('click', closePreview);
     el.previewDownload.addEventListener('click', function () {
@@ -2607,6 +3582,10 @@
     });
     document.addEventListener('keydown', function (event) {
       if (event.key !== 'Escape') return;
+      if (el.sendModal && !el.sendModal.hidden) {
+        onSendCancel();
+        return;
+      }
       if (el.fsModal && !el.fsModal.hidden) {
         closeFsModal();
         return;

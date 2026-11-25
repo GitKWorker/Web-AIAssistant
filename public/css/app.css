@@ -1272,4 +1272,93 @@ input:focus, select:focus, textarea:focus {
   .preview-body iframe { height: 100%; }
   .cf-btns .btn-ghost { padding: 0 6px; }
   .uc-split { line-height: 1.6; }
+  .oc-dev { display: none; }
+}
+
+/* ---------- 在线成员列表（消息同步页顶部） ---------- */
+
+.online-bar {
+  padding: 8px 16px 0;
+  border-bottom: 0.5px solid var(--line);
+}
+.online-chips {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 8px;
+  scrollbar-width: thin;
+}
+.online-empty { font-size: 11.5px; color: var(--text-3); line-height: 34px; }
+.online-chip {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px 4px 4px;
+  border: 0.5px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  cursor: pointer;
+  transition: border-color 120ms, background 120ms;
+}
+.online-chip:hover { border-color: var(--accent); background: var(--accent-soft); }
+.online-chip.is-self { cursor: default; opacity: 0.75; }
+.online-chip.is-self:hover { border-color: var(--line); background: var(--surface); }
+.oc-avatar {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.oc-text { display: flex; flex-direction: column; align-items: flex-start; line-height: 1.2; }
+.oc-name { font-size: 12px; color: var(--text); }
+.oc-dev { font-size: 10.5px; color: var(--text-3); }
+
+/* ---------- 私发消息标记 ---------- */
+
+.msg-private {
+  font-size: 10.5px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* ---------- 发文件弹层（复用 fs-modal 骨架） ---------- */
+
+.send-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.send-actions .btn-ghost { height: 32px; padding: 0 14px; }
+.p-row { display: flex; flex-direction: column; gap: 6px; }
+.p-label { font-size: 11.5px; color: var(--text-2); }
+.p-line { display: flex; align-items: center; gap: 8px; }
+.p-bar {
+  flex: 1;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+.p-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 150ms;
+}
+.p-pct { flex: 0 0 auto; font-size: 11px; color: var(--text-3); min-width: 34px; text-align: right; }
+.p-fileinfo {
+  font-size: 12px;
+  color: var(--text);
+  word-break: break-all;
+  padding: 8px 10px;
+  border: 0.5px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2, var(--surface));
 }

@@ -91,6 +91,10 @@
         <div class="pill"><span class="dot"></span><span id="online-pill">0 / 20</span></div>
       </header>
 
+      <div class="online-bar" id="online-bar">
+        <div class="online-chips" id="online-chips"></div>
+      </div>
+
       <div class="messages" id="messages"></div>
 
       <button type="button" class="jump-new" id="jump-new" hidden>有新消息</button>
@@ -379,6 +383,24 @@
     </div>
   </div>
 </div>
+
+<div class="fs-modal" id="send-modal" hidden>
+  <div class="fs-mask" id="send-mask"></div>
+  <div class="fs-box" role="dialog" aria-modal="true" aria-labelledby="send-title">
+    <div class="fs-head">
+      <span class="fs-title" id="send-title">发送文件给 —</span>
+      <button type="button" class="preview-close" id="send-close" aria-label="关闭">×</button>
+    </div>
+    <div class="fs-body" id="send-body"></div>
+    <div class="fs-foot">
+      <button type="button" class="btn-ghost btn-sm" id="send-cancel">取消</button>
+      <button type="button" class="btn-primary btn-sm" id="send-ok" hidden>确定</button>
+    </div>
+  </div>
+</div>
+
+<input type="file" id="send-file" multiple hidden>
+<input type="file" id="send-folder" webkitdirectory hidden>
 
 <div class="fs-modal" id="fs-modal" hidden>
   <div class="fs-mask" id="fs-mask"></div>

@@ -105,16 +105,22 @@ function acceptsGzip(req) {
 
 const streamClients = new Set();
 
-function broadcast(event, data) {
+function broadcast(event, data, filter) {
   if (!streamClients.size) return;
   const chunk = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
   for (const client of streamClients) {
+    if (filter && !filter(client)) continue;
     try {
       client.res.write(chunk);
     } catch {
       streamClients.delete(client);
     }
   }
+}
+
+// 在线名单变化：推给所有人（含成员列表，前端在线用户列表用）
+function broadcastOnline() {
+  broadcast('online', { online: sessions.count(), members: sessions.members() });
 }
 
 function openStream(req, res, url) {
@@ -139,7 +145,7 @@ function openStream(req, res, url) {
 
   const afterId = Number(url.searchParams.get('afterId'));
   if (url.searchParams.get('afterId') !== null && Number.isFinite(afterId)) {
-    const backlog = store.listAfter(afterId, LIMITS.maxFetch);
+    const backlog = store.listAfter(afterId, LIMITS.maxFetch, session.username);
     if (backlog.reset || backlog.messages.length) {
       res.write(
         `event: backlog\ndata: ${JSON.stringify({
@@ -153,10 +159,10 @@ function openStream(req, res, url) {
 
   const last = store.messages.length ? store.messages[store.messages.length - 1].id : 0;
   res.write(
-    `event: hello\ndata: ${JSON.stringify({ online: sessions.count(), cursor: last, serverTime: Date.now() })}\n\n`,
+    `event: hello\ndata: ${JSON.stringify({ online: sessions.count(), members: sessions.members(), cursor: last, serverTime: Date.now() })}\n\n`,
   );
 
-  const client = { res, sessionId: session.sessionId };
+  const client = { res, sessionId: session.sessionId, username: session.username };
   streamClients.add(client);
 
   const ping = setInterval(() => {
@@ -318,7 +324,7 @@ async function handleLogin(req, res) {
     return fail(res, 409, 'ROOM_FULL', `当前在线已满（${LIMITS.maxOnline}/${LIMITS.maxOnline}），请稍后再试`);
   }
   const session = sessions.create({ username: account.username, deviceName, ip: clientIp(req) });
-  broadcast('online', { online: sessions.count() });
+  broadcastOnline();
   return sendJson(res, 200, {
     sessionId: session.sessionId,
     me: publicMe(session),
@@ -332,7 +338,7 @@ async function handleLogout(req, res, url) {
   const fromQuery = url ? url.searchParams.get('sid') : null;
   const sessionId = fromHeader || fromQuery;
   if (sessionId) sessions.destroy(String(sessionId));
-  broadcast('online', { online: sessions.count() });
+  broadcastOnline();
   return sendJson(res, 200, { ok: true, online: sessions.count() });
 }
 
@@ -479,7 +485,7 @@ async function handleUserUpdate(req, res, target) {
   let kicked = 0;
   if (renaming) kicked += sessions.destroyByUsername(previousName);
   if (nextPassword) kicked += sessions.destroyByUsername(account.username);
-  if (kicked > 0) broadcast('online', { online: sessions.count() });
+  if (kicked > 0) broadcastOnline();
 
   const updated = accounts.findByUsername(account.username);
   return sendJson(res, 200, {
@@ -504,7 +510,7 @@ async function handleUserDelete(req, res, target) {
 
   const removed = accounts.remove(account.username);
   const kicked = sessions.destroyByUsername(account.username);
-  if (kicked > 0) broadcast('online', { online: sessions.count() });
+  if (kicked > 0) broadcastOnline();
 
   return sendJson(res, 200, { ok: true, removed: removed.username, kicked });
 }
@@ -998,8 +1004,8 @@ async function handleMessages(req, res, url, session) {
 
     const payload =
       afterRaw === null || afterRaw === '' || !Number.isFinite(Number(afterRaw))
-        ? store.latest(limit)
-        : store.listAfter(Number(afterRaw), limit);
+        ? store.latest(limit, session.username)
+        : store.listAfter(Number(afterRaw), limit, session.username);
 
     return sendJson(res, 200, {
       messages: payload.messages,
@@ -1007,6 +1013,7 @@ async function handleMessages(req, res, url, session) {
       reset: payload.reset,
       total: payload.total,
       online: sessions.count(),
+      members: sessions.members(),
       serverTime: Date.now(),
     });
   }
@@ -1036,6 +1043,20 @@ async function handleMessages(req, res, url, session) {
     return fail(res, 429, 'RATE_LIMITED', '发送太频繁了，请稍后再试');
   }
 
+  // 私发目标：只接受真实存在的账号，统一成规范用户名后入库
+  let to = '';
+  const toRaw = String(body.to || '').trim();
+  if (toRaw) {
+    if (toRaw.toLowerCase() === session.username.toLowerCase()) {
+      return fail(res, 400, 'INVALID_INPUT', '不能私发给自己');
+    }
+    const target = accounts.findByUsername(toRaw);
+    if (!target) {
+      return fail(res, 404, 'NOT_FOUND', '目标用户不存在');
+    }
+    to = target.username;
+  }
+
   const message = store.add({
     deviceKey: session.deviceKey,
     username: session.username,
@@ -1044,12 +1065,71 @@ async function handleMessages(req, res, url, session) {
     content,
     clientMsgId,
     file,
+    to,
   });
   rememberClientMsg(clientMsgId, message);
 
-  broadcast('message', { message, online: sessions.count() });
+  // 私发消息只推给收件人与发送人的连接
+  broadcast(
+    'message',
+    { message, online: sessions.count() },
+    message.to ? (client) => client.username === message.to || client.username === message.username : null,
+  );
 
   return sendJson(res, 200, { message, online: sessions.count() });
+}
+
+// 端到端直传的信令中转：只转发 SDP / 候选地址 / 控制消息，文件字节不经过服务器。
+// 双方各自打开 SSE 连接，信号按用户名投递到对方的全部在线设备。
+async function handlePeerSignal(req, res, session) {
+  let body;
+  try {
+    body = await readBody(req, 96 * 1024);
+  } catch (err) {
+    return fail(res, 400, 'INVALID_INPUT', err.message === 'BODY_TOO_LARGE' ? '请求体过大' : '请求格式错误');
+  }
+  const toRaw = String(body.to || '').trim();
+  if (!toRaw) {
+    return fail(res, 400, 'INVALID_INPUT', '缺少目标用户');
+  }
+  if (toRaw.toLowerCase() === session.username.toLowerCase()) {
+    return fail(res, 400, 'INVALID_INPUT', '不能给自己发信令');
+  }
+  const target = accounts.findByUsername(toRaw);
+  if (!target) {
+    return fail(res, 404, 'NOT_FOUND', '用户不存在');
+  }
+  if (!body.payload || typeof body.payload !== 'object') {
+    return fail(res, 400, 'INVALID_INPUT', '信令内容无效');
+  }
+  const targets = [];
+  for (const client of streamClients) {
+    if (client.username === target.username) targets.push(client);
+  }
+  if (!targets.length) {
+    return fail(res, 404, 'USER_OFFLINE', '对方当前不在线');
+  }
+  const chunk = `event: peer\ndata: ${JSON.stringify({
+    from: session.username,
+    fromDevice: session.deviceName,
+    payload: body.payload,
+  })}\n\n`;
+  let delivered = 0;
+  for (const client of targets) {
+    try {
+      client.res.write(chunk);
+      delivered += 1;
+    } catch {
+      streamClients.delete(client);
+    }
+  }
+  if (!delivered) {
+    return fail(res, 404, 'USER_OFFLINE', '对方当前不在线');
+  }
+  if (rateLimited(`peer:${session.deviceKey}`)) {
+    return fail(res, 429, 'RATE_LIMITED', '信令发送太频繁，请稍后再试');
+  }
+  return sendJson(res, 200, { ok: true, delivered });
 }
 
 async function handleApi(req, res, url) {
@@ -1116,6 +1196,23 @@ async function handleApi(req, res, url) {
       cursor: store.messages.length ? store.messages[store.messages.length - 1].id : 0,
       serverTime: Date.now(),
     });
+  }
+
+  if (route === 'GET /api/online') {
+    const session = requireSession(req, res);
+    if (!session) return undefined;
+    return sendJson(res, 200, {
+      online: sessions.count(),
+      members: sessions.members(),
+      me: session.username,
+      serverTime: Date.now(),
+    });
+  }
+
+  if (route === 'POST /api/peer/signal') {
+    const session = requireSession(req, res);
+    if (!session) return undefined;
+    return handlePeerSignal(req, res, session);
   }
 
   if (route === 'POST /api/files/sign') {
@@ -1298,7 +1395,7 @@ const housekeeping = setInterval(() => {
   const before = sessions.count();
   sessions.sweep();
   const after = sessions.count();
-  if (before !== after) broadcast('online', { online: after });
+  if (before !== after) broadcastOnline();
   const now = Date.now();
   for (const [key, hits] of rateMap) {
     if (!hits.some((t) => now - t < LIMITS.rateWindowMs)) rateMap.delete(key);

@@ -150,7 +150,16 @@ function makeFetch(log, role) {
         limits: { maxOnline: 20 },
       };
     } else if (u.indexOf('/api/messages?') === 0) {
-      data = { messages: [], cursor: 0, online: 1 };
+      data = {
+        messages: [],
+        cursor: 0,
+        online: 3,
+        members: [
+          { username: 'admin', deviceName: 'jsdom', displayName: 'admin', lastSeen: Date.now() },
+          { username: '李雷', deviceName: 'MacBook', displayName: '李雷 · MacBook', lastSeen: Date.now() },
+          { username: '李雷', deviceName: 'iPhone', displayName: '李雷 · iPhone', lastSeen: Date.now() },
+        ],
+      };
     } else if (u.indexOf('/api/files/sign') === 0) {
       // 回显请求的 scene，便于断言上传去向（keep 走 Tigris k/ 前缀，chat/share 走 R2）
       const reqBody = JSON.parse((opts && opts.body) || '{}');
@@ -260,6 +269,7 @@ function makeFetch(log, role) {
       }
     } else if (u.indexOf('/api/messages') === 0 && method === 'POST') {
       const body = JSON.parse((opts && opts.body) || '{}');
+      (log.msgPosts = log.msgPosts || []).push(body);
       data = {
         message: {
           id: 'm-' + Math.random().toString(16).slice(2),
@@ -268,6 +278,7 @@ function makeFetch(log, role) {
           displayName: 'admin',
           content: body.content || '',
           file: body.file || null,
+          to: body.to || null,
           createdAt: Date.now(),
         },
         online: 1,
@@ -681,6 +692,49 @@ function dropFile(win, doc, name, type, size) {
   const deletes = F.calls.folderDeletes || [];
   ok('删除文件夹请求带完整路径', deletes.length === 1 && deletes[0] === '工作/2026', String(deletes));
   MOCK_TREE = false;
+
+  /* ---------- 场景 13：在线成员列表与发文件入口 ---------- */
+  console.log('\n[13] 在线成员列表与发文件入口');
+  const chips = A.doc.querySelectorAll('#online-chips .online-chip');
+  ok('在线成员按用户归组（2 人）', chips.length === 2, String(chips.length));
+  const selfChip = A.doc.querySelector('#online-chips .online-chip.is-self');
+  ok('自己标记（我）', Boolean(selfChip) && selfChip.textContent.indexOf('（我）') >= 0);
+  const peerChip = Array.from(chips).find((c) => !c.classList.contains('is-self'));
+  ok('对方 chip 标题可发文件', Boolean(peerChip) && peerChip.getAttribute('title') === '给 李雷 发文件');
+  peerChip.click();
+  await sleep(40);
+  ok('发文件弹层打开', A.doc.getElementById('send-modal').hidden === false);
+  ok('弹层标题指向对方', A.doc.getElementById('send-title').textContent === '发送文件给 李雷');
+  ok('弹层有选择文件/文件夹按钮',
+    A.doc.getElementById('send-body').textContent.indexOf('选择文件') >= 0 &&
+    A.doc.getElementById('send-body').textContent.indexOf('选择文件夹') >= 0);
+  A.doc.getElementById('send-cancel').click();
+  await sleep(30);
+  ok('取消后弹层关闭', A.doc.getElementById('send-modal').hidden === true);
+
+  /* ---------- 场景 14：不支持直传时回落云盘中转，私发消息带标记 ---------- */
+  console.log('\n[14] 直传不可用 → 云盘中转确认 → 私发消息');
+  peerChip.click();
+  await sleep(40);
+  const binFile = new A.win.File(['hello-transfer'], '直传测试.bin', { type: 'application/octet-stream' });
+  Object.defineProperty(A.doc.getElementById('send-file'), 'files', { value: [binFile] });
+  A.doc.getElementById('send-file').dispatchEvent(new A.win.Event('change'));
+  await sleep(60);
+  const sendOk = A.doc.getElementById('send-ok');
+  ok('无 WebRTC 时提示云盘中转', sendOk.hidden === false && sendOk.textContent === '同意中转');
+  ok('中转说明出现', A.doc.getElementById('send-body').textContent.indexOf('云盘中转') >= 0);
+  sendOk.click();
+  await sleep(60);
+  const putXhr = FakeXHR.instances[FakeXHR.instances.length - 1];
+  ok('中转走对象存储上传（PUT）', putXhr && putXhr.method === 'PUT');
+  putXhr.finish(200);
+  await sleep(80);
+  const posts = A.calls.msgPosts || [];
+  const relayPost = posts.find((p) => p.to === '李雷' && p.file);
+  ok('私发消息带收件人与附件', Boolean(relayPost), JSON.stringify(relayPost ? { to: relayPost.to, key: relayPost.file.key } : null));
+  ok('私发消息渲染私发标记', Boolean(A.doc.querySelector('#messages .msg-private')));
+  const badge = A.doc.querySelector('#messages .msg-private');
+  ok('标记指明收件人', badge && badge.textContent === '私发·李雷', badge && badge.textContent);
 
   /* ---------- 汇总 ---------- */
   console.log('\n----------------------------------------');
