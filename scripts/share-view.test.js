@@ -57,6 +57,84 @@ class FakeXHR {
 }
 FakeXHR.instances = [];
 
+// 目录模式：打开后 /api/files 返回带 folders/crumbs 的目录视图（场景 12 使用）
+let MOCK_TREE = false;
+
+const TREE_FILES = [
+  {
+    key: 's/f1/0123456789abcdef0123456789abcdef/根文件.pdf',
+    name: '根文件.pdf',
+    folder: '',
+    size: 1024,
+    createdAt: Date.now() - 1000,
+    expireAt: Date.now() + 86400000,
+    scene: 'share',
+    url: 'https://files.frkang.top/s/f1/x',
+  },
+  {
+    key: 's/工作/0123456789abcdef0123456789abcdef/方案.pdf',
+    name: '方案.pdf',
+    folder: '工作',
+    size: 2048,
+    createdAt: Date.now() - 2000,
+    expireAt: Date.now() + 86400000,
+    scene: 'share',
+    url: 'https://files.frkang.top/s/f2/x',
+  },
+  {
+    key: 's/工作/2026/abcdefabcdefabcdefabcdefabcdefab/预算.xlsx',
+    name: '预算.xlsx',
+    folder: '工作/2026',
+    size: 4096,
+    createdAt: Date.now() - 3000,
+    expireAt: Date.now() + 86400000,
+    scene: 'share',
+    url: 'https://files.frkang.top/s/f3/x',
+  },
+];
+
+function treePayload(folder) {
+  const base = folder ? folder + '/' : '';
+  const objects = TREE_FILES.filter((o) => o.folder === folder);
+  const counts = new Map();
+  TREE_FILES.forEach((o) => {
+    if (o.folder === folder) return;
+    if (base) {
+      if (o.folder.indexOf(base) !== 0) return;
+      const rest = o.folder.slice(base.length);
+      const top = rest.split('/')[0];
+      if (top) counts.set(top, (counts.get(top) || 0) + 1);
+    } else {
+      const top = o.folder.split('/')[0];
+      if (top) counts.set(top, (counts.get(top) || 0) + 1);
+    }
+  });
+  return {
+    store: 'tmp',
+    folder,
+    crumbs: folder
+      ? folder.split('/').map((name, i, arr) => ({ name, path: arr.slice(0, i + 1).join('/') }))
+      : [],
+    folders: Array.from(counts.entries()).map(([name, count]) => ({
+      name,
+      path: base + name,
+      count,
+      bytes: count * 2048,
+    })),
+    objects,
+    usage: {
+      count: TREE_FILES.length,
+      bytes: 7168,
+      quotaBytes: 10737418240,
+      percent: 0.01,
+      byScene: { chat: { count: 0, bytes: 0 }, share: { count: 3, bytes: 7168 }, keep: { count: 0, bytes: 0 }, other: { count: 0, bytes: 0 } },
+    },
+    truncated: false,
+    cached: false,
+    fetchedAt: Date.now(),
+  };
+}
+
 function makeFetch(log, role) {
   const meRole = role || 'admin';
   return function (url, opts) {
@@ -89,13 +167,29 @@ function makeFetch(log, role) {
         store: scene === 'keep' ? 'keep' : 'tmp',
       };
       (log.signKeys = log.signKeys || []).push(data.key);
+      (log.signFolders = log.signFolders || []).push(reqBody.folder || '');
     } else if (u.indexOf('/api/files/download') === 0) {
       data = { url: 'https://r2.example/signed-get?x=1', name: '照片.png', size: 2097152, expiresIn: 300 };
+    } else if (u.split('?')[0] === '/api/files/folder' && method === 'POST') {
+      const body = JSON.parse((opts && opts.body) || '{}');
+      (log.folderCreates = log.folderCreates || []).push(body);
+      data = { ok: true, store: body.store, path: body.path };
+    } else if (u.split('?')[0] === '/api/files/folder' && method === 'DELETE') {
+      (log.folderDeletes = log.folderDeletes || []).push(decodeURIComponent((u.split('path=')[1] || '')));
+      data = { ok: true, deleted: 3 };
+    } else if (u.split('?')[0] === '/api/files/move' && method === 'POST') {
+      const body = JSON.parse((opts && opts.body) || '{}');
+      (log.moves = log.moves || []).push(body);
+      data = { ok: true, store: 'tmp', from: body.key, key: 's/归档/x/y.pdf', folder: body.folder };
     } else if (u.split('?')[0] === '/api/files' && method === 'DELETE') {
       deletedKeys.add(decodeURIComponent((u.split('key=')[1] || '')));
       data = { ok: true, key: 's/a1/照片.png', name: '照片.png' };
     } else if (u.split('?')[0] === '/api/files') {
-      if (u.indexOf('store=keep') >= 0) {
+      if (MOCK_TREE) {
+        const m = u.match(/[?&]folder=([^&]*)/);
+        const folder = m ? decodeURIComponent(m[1]) : '';
+        data = treePayload(folder);
+      } else if (u.indexOf('store=keep') >= 0) {
         // 永久存储（Tigris）：5GB 免费额度、不过期
         data = {
           store: 'keep',
@@ -362,18 +456,15 @@ function dropFile(win, doc, name, type, size) {
   ok('文件行数 2', rows.length === 2, rows.length + ' 行');
   ok('图片行渲染缩略图', Boolean(rows[0].querySelector('.cf-thumb img')));
   ok(
-    '每行按钮齐全（查看/下载/链接/二维码/删除）',
-    rows[0].querySelectorAll('.cf-btns button').length === 5,
+    '每行按钮齐全（查看/下载/链接/二维码/移动/删除）',
+    rows[0].querySelectorAll('.cf-btns button').length === 6,
     rows[0].querySelector('.cf-btns').textContent,
   );
-  ok(
-    '二维码按钮有提示',
-    rows[0].querySelectorAll('.cf-btns button')[3].title === '扫码下载',
-  );
-  ok(
-    '删除按钮为危险色',
-    rows[0].querySelectorAll('.cf-btns button')[4].classList.contains('cf-danger'),
-  );
+  const qrBtn0 = rows[0].querySelector('[aria-label="扫码下载"]');
+  ok('二维码按钮有提示', Boolean(qrBtn0) && qrBtn0.title === '扫码下载');
+  const delBtn0 = rows[0].querySelector('[aria-label="删除文件"]');
+  ok('删除按钮为危险色', Boolean(delBtn0) && delBtn0.classList.contains('cf-danger'));
+  ok('移动按钮存在', Boolean(rows[0].querySelector('[aria-label="移动到文件夹"]')));
   ok('名称与大小正确', rows[0].querySelector('.cf-name').textContent === '照片.png');
 
   rows[0].querySelectorAll('.cf-btns button')[0].click();
@@ -409,7 +500,7 @@ function dropFile(win, doc, name, type, size) {
   ok('二维码弹层关闭', qrModal.hidden === true);
 
   const before = E.doc.querySelectorAll('#cf-list .cf-row').length;
-  E.doc.querySelectorAll('#cf-list .cf-row')[0].querySelectorAll('.cf-btns button')[4].click();
+  E.doc.querySelectorAll('#cf-list .cf-row')[0].querySelector('[aria-label="删除文件"]').click();
   await sleep(200);
   ok('删除走 DELETE 接口', E.calls.indexOf('DELETE /api/files') >= 0, E.calls.join(','));
   ok(
@@ -496,6 +587,100 @@ function dropFile(win, doc, name, type, size) {
   H.doc.getElementById('cf-tab-tmp').click();
   await sleep(80);
   ok('切回临时页签历史恢复', H.doc.getElementById('sh-list').textContent.indexOf('临时文件.zip') >= 0);
+
+  /* ---------- 场景 12：文件夹管理 ---------- */
+  console.log('\n[12] 文件夹：多层目录 / 新建 / 上传到目录 / 移动 / 删除');
+  MOCK_TREE = true;
+  const F = await boot(null);
+  nav(F.doc, 'files');
+  await sleep(140);
+
+  const fRows = () => Array.from(F.doc.querySelectorAll('#cf-list .cf-row'));
+  ok(
+    '根目录出现文件夹行',
+    fRows().some((r) => r.classList.contains('is-folder') && r.textContent.indexOf('工作') >= 0),
+    F.doc.getElementById('cf-list').textContent,
+  );
+  ok('根目录文件同时显示', F.doc.getElementById('cf-list').textContent.indexOf('根文件.pdf') >= 0);
+  ok(
+    '面包屑停在根目录',
+    F.doc.getElementById('cf-crumbs').textContent.replace(/\s/g, '') === '根目录',
+    F.doc.getElementById('cf-crumbs').textContent,
+  );
+  ok(
+    '上传目标提示根目录',
+    F.doc.getElementById('share-target').textContent.indexOf('根目录') >= 0,
+    F.doc.getElementById('share-target').textContent,
+  );
+
+  const workRow = fRows().find((r) => r.classList.contains('is-folder') && r.textContent.indexOf('工作') >= 0);
+  workRow.click();
+  await sleep(140);
+  ok(
+    '进入文件夹后显示其中文件',
+    F.doc.getElementById('cf-list').textContent.indexOf('方案.pdf') >= 0,
+    F.doc.getElementById('cf-list').textContent,
+  );
+  ok(
+    '面包屑显示多层路径',
+    F.doc.getElementById('cf-crumbs').textContent.replace(/\s/g, '').indexOf('根目录/工作') >= 0,
+    F.doc.getElementById('cf-crumbs').textContent,
+  );
+  ok(
+    '上传目标跟随当前目录',
+    F.doc.getElementById('share-target').textContent.indexOf('工作') >= 0,
+    F.doc.getElementById('share-target').textContent,
+  );
+
+  dropFile(F.win, F.doc, '目录内.txt', 'text/plain', 100);
+  await sleep(160);
+  const signFolders = F.calls.signFolders || [];
+  ok('上传许可携带当前目录', signFolders[signFolders.length - 1] === '工作', String(signFolders));
+  const dirXhr = FakeXHR.instances[FakeXHR.instances.length - 1];
+  dirXhr.finish(200);
+  await sleep(120);
+
+  // 新建文件夹
+  F.doc.getElementById('cf-newfolder').click();
+  await sleep(40);
+  ok('新建文件夹弹层打开', F.doc.getElementById('fs-modal').hidden === false);
+  F.doc.getElementById('fs-input').value = '工作/归档';
+  F.doc.getElementById('fs-ok').click();
+  await sleep(120);
+  const creates = F.calls.folderCreates || [];
+  ok(
+    '新建文件夹请求正确',
+    creates.length === 1 && creates[0].path === '工作/归档' && creates[0].store === 'tmp',
+    JSON.stringify(creates),
+  );
+  ok('新建后弹层关闭', F.doc.getElementById('fs-modal').hidden === true);
+
+  // 移动文件
+  const planRow = fRows().find((r) => r.textContent.indexOf('方案.pdf') >= 0);
+  const moveBtn = planRow.querySelector('[aria-label="移动到文件夹"]');
+  ok('文件行有移动按钮', Boolean(moveBtn));
+  moveBtn.click();
+  await sleep(40);
+  ok('移动弹层打开且预填当前目录', F.doc.getElementById('fs-modal').hidden === false &&
+    F.doc.getElementById('fs-input').value === '工作');
+  F.doc.getElementById('fs-input').value = '工作/归档';
+  F.doc.getElementById('fs-ok').click();
+  await sleep(140);
+  const moves = F.calls.moves || [];
+  ok(
+    '移动请求携带目标目录',
+    moves.length === 1 && moves[0].folder === '工作/归档' && moves[0].key.indexOf('方案.pdf') >= 0,
+    JSON.stringify(moves),
+  );
+
+  // 删除文件夹（非空二次确认）
+  const subRow = fRows().find((r) => r.classList.contains('is-folder') && r.textContent.indexOf('2026') >= 0);
+  ok('子文件夹行存在', Boolean(subRow));
+  subRow.querySelector('[aria-label="删除文件夹"]').click();
+  await sleep(140);
+  const deletes = F.calls.folderDeletes || [];
+  ok('删除文件夹请求带完整路径', deletes.length === 1 && deletes[0] === '工作/2026', String(deletes));
+  MOCK_TREE = false;
 
   /* ---------- 汇总 ---------- */
   console.log('\n----------------------------------------');

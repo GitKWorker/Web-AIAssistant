@@ -61,6 +61,14 @@
     // 云端文件当前页签：tmp = R2 临时（7 天）/ keep = Tigris 永久
     fileStore: 'tmp',
     keepUpload: false,
+    // 云端目录：当前所在文件夹，以及每个存储各自的位置（切页签时恢复）
+    folder: '',
+    folderByStore: { tmp: '', keep: '' },
+    subFolders: [],
+    crumbs: [],
+    // 目录弹层：newfolder（新建文件夹）/ move（移动文件）
+    fsMode: '',
+    fsKey: '',
   };
 
   var el = {};
@@ -158,6 +166,18 @@
     el.cfTabs = $('cf-tabs');
     el.cfTabTmp = $('cf-tab-tmp');
     el.cfTabKeep = $('cf-tab-keep');
+    el.cfCrumbs = $('cf-crumbs');
+    el.cfNewFolder = $('cf-newfolder');
+    el.shareTarget = $('share-target');
+    el.fsModal = $('fs-modal');
+    el.fsMask = $('fs-mask');
+    el.fsTitle = $('fs-title');
+    el.fsHint = $('fs-hint');
+    el.fsInput = $('fs-input');
+    el.fsList = $('fs-list');
+    el.fsOk = $('fs-ok');
+    el.fsCancel = $('fs-cancel');
+    el.fsClose = $('fs-close');
     el.preview = $('preview');
     el.previewMask = $('preview-mask');
     el.previewName = $('preview-name');
@@ -911,12 +931,13 @@
 
   // 先向服务端换取一次性上传许可，再由浏览器直传 R2。
   // 用 XHR 而非 fetch：只有 XHR 能读到上传进度。
-  function uploadToR2(file, scene, onProgress) {
+  function uploadToR2(file, scene, onProgress, folder) {
     return api('POST', '/api/files/sign', {
       name: file.name,
       size: file.size,
       mime: file.type || '',
       scene: scene,
+      folder: folder || '',
     }).then(function (ticket) {
       return new Promise(function (resolve, reject) {
         var xhr = new XMLHttpRequest();
@@ -940,6 +961,7 @@
               url: ticket.publicUrl,
               expireAt: ticket.expireAt,
               store: ticket.store || (scene === 'keep' ? 'keep' : 'tmp'),
+              folder: ticket.folder || '',
             });
           } else if (xhr.status === 403) {
             reject(new Error('上传许可已失效，请重试'));
@@ -1149,6 +1171,7 @@
     if (!state.fileUpload) {
       el.shareHint.textContent = '文件功能未配置，请联系管理员填写存储凭据';
       el.shareDrop.classList.toggle('is-disabled', true);
+      syncShareTarget();
       return;
     }
     var keep = state.fileStore === 'keep' && state.keepUpload;
@@ -1156,6 +1179,20 @@
       ? '单个文件最大 ' + state.maxFileMB + ' MB · 永久保存（Tigris）'
       : '单个文件最大 ' + state.maxFileMB + ' MB · 文件保存 ' + state.retainFileDays + ' 天';
     el.shareDrop.classList.toggle('is-disabled', false);
+    syncShareTarget();
+  }
+
+  // 上传目标：跟随云端列表当前所在目录（成员看不到目录列表，一律传根目录）
+  function syncShareTarget() {
+    if (!el.shareTarget) return;
+    if (!state.fileUpload) {
+      el.shareTarget.hidden = true;
+      return;
+    }
+    var storeName = state.fileStore === 'keep' ? '永久存储' : '临时存储';
+    var path = canSeeCloudFiles() ? state.folder || '' : '';
+    el.shareTarget.hidden = false;
+    el.shareTarget.textContent = '上传到：' + storeName + ' / ' + (path || '根目录');
   }
 
   // 「再传一个」：只清当前结果，不动本地历史
@@ -1219,6 +1256,10 @@
     state.filesUsage = null;
     state.filesAt = 0;
     state.filesReqId = (state.filesReqId || 0) + 1;
+    // 目录位置按存储各自记忆：从永久页签切回来时仍然停在原目录
+    state.folder = state.folderByStore[store] || '';
+    state.subFolders = [];
+    state.crumbs = [];
     renderUsage(null);
     renderCloudFiles();
     // 上一条分享结果属于另一个存储时，重置为拖拽区，避免误导
@@ -1228,6 +1269,22 @@
     renderShareHistory();
     syncShareHint();
     loadCloudFiles(true);
+  }
+
+  // 进入子目录（path 为相对存储根的路径，'' 表示回到根目录）
+  function enterFolder(path) {
+    var target = String(path || '');
+    if (target === state.folder) return;
+    state.folder = target;
+    state.folderByStore[state.fileStore === 'keep' ? 'keep' : 'tmp'] = target;
+    state.files = [];
+    state.subFolders = [];
+    state.crumbs = [];
+    state.filesAt = 0;
+    state.filesReqId = (state.filesReqId || 0) + 1;
+    renderCloudFiles();
+    syncShareTarget();
+    loadCloudFiles(false);
   }
 
   function shareHistoryKey() {
@@ -1327,7 +1384,8 @@
         fmtSize(item.size) +
         ' · ' +
         (exp > 0 ? expireText(item.expireAt) : '永久保存') +
-        (item.store === 'keep' ? ' · Tigris' : '');
+        (item.store === 'keep' ? ' · Tigris' : '') +
+        (item.folder ? ' · ' + item.folder : '');
       meta.appendChild(name);
       meta.appendChild(sub);
 
@@ -1384,20 +1442,27 @@
     el.spPct.textContent = '0%';
 
     var startedAt = 0;
-    uploadToR2(file, scene, function (ratio) {
-      var p = Math.max(0, Math.min(1, ratio || 0));
-      el.spFill.style.width = (p * 100).toFixed(1) + '%';
-      el.spPct.textContent = Math.round(p * 100) + '%';
-      if (!startedAt && p > 0.02) startedAt = Date.now();
-      if (startedAt && p < 1) {
-        var speed = (file.size * p) / Math.max(0.3, (Date.now() - startedAt) / 1000);
-        var remain = (file.size * (1 - p)) / Math.max(1, speed);
-        el.spMeta.textContent =
-          fmtSize(file.size) + ' · ' + (remain > 1 ? '剩余约 ' + Math.ceil(remain) + ' 秒' : '即将完成');
-      } else if (p >= 1) {
-        el.spMeta.textContent = fmtSize(file.size) + ' · 生成链接…';
-      }
-    })
+    // 上传到列表当前所在目录（成员没有目录列表，一律根目录）
+    var targetFolder = canSeeCloudFiles() ? state.folder || '' : '';
+    uploadToR2(
+      file,
+      scene,
+      function (ratio) {
+        var p = Math.max(0, Math.min(1, ratio || 0));
+        el.spFill.style.width = (p * 100).toFixed(1) + '%';
+        el.spPct.textContent = Math.round(p * 100) + '%';
+        if (!startedAt && p > 0.02) startedAt = Date.now();
+        if (startedAt && p < 1) {
+          var speed = (file.size * p) / Math.max(0.3, (Date.now() - startedAt) / 1000);
+          var remain = (file.size * (1 - p)) / Math.max(1, speed);
+          el.spMeta.textContent =
+            fmtSize(file.size) + ' · ' + (remain > 1 ? '剩余约 ' + Math.ceil(remain) + ' 秒' : '即将完成');
+        } else if (p >= 1) {
+          el.spMeta.textContent = fmtSize(file.size) + ' · 生成链接…';
+        }
+      },
+      targetFolder,
+    )
       .then(function (meta) {
         pushShareHistory(meta);
         renderShareResult(meta);
@@ -1432,7 +1497,8 @@
     el.srSub.textContent =
       fmtSize(meta.size) +
       ' · ' +
-      (Number(meta.expireAt) > 0 ? expireText(meta.expireAt) + ' · 保存 ' + state.retainFileDays + ' 天' : '永久保存 · Tigris');
+      (Number(meta.expireAt) > 0 ? expireText(meta.expireAt) + ' · 保存 ' + state.retainFileDays + ' 天' : '永久保存 · Tigris') +
+      (meta.folder ? ' · ' + meta.folder : '');
     el.srUrl.value = meta.url;
     el.srOpen.href = meta.key ? scanDownloadUrl(meta.key) : meta.url;
     el.srOpen.textContent = '下载文件';
@@ -1519,16 +1585,232 @@
     el.usageSplit.textContent = parts.join('　·　');
   }
 
+  // 面包屑：根目录 / 子目录…，除末级外都可点
+  function renderCrumbs() {
+    if (!el.cfCrumbs) return;
+    el.cfCrumbs.textContent = '';
+    var crumbs = state.crumbs || [];
+
+    var rootBtn = document.createElement('button');
+    rootBtn.type = 'button';
+    rootBtn.className = 'cf-crumb' + (crumbs.length ? '' : ' is-current');
+    rootBtn.textContent = '根目录';
+    rootBtn.title = '回到根目录';
+    if (crumbs.length) {
+      rootBtn.addEventListener('click', function () {
+        enterFolder('');
+      });
+    }
+    el.cfCrumbs.appendChild(rootBtn);
+
+    crumbs.forEach(function (crumb, index) {
+      var sep = document.createElement('span');
+      sep.className = 'cf-sep';
+      sep.textContent = '/';
+      el.cfCrumbs.appendChild(sep);
+
+      var last = index === crumbs.length - 1;
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'cf-crumb' + (last ? ' is-current' : '');
+      btn.textContent = crumb.name;
+      btn.title = crumb.path;
+      if (!last) {
+        btn.addEventListener('click', function () {
+          enterFolder(crumb.path);
+        });
+      }
+      el.cfCrumbs.appendChild(btn);
+    });
+  }
+
+  function currentStore() {
+    return state.fileStore === 'keep' && state.keepUpload ? 'keep' : 'tmp';
+  }
+
+  // 目录弹层：新建文件夹 / 移动文件共用
+  function openFsModal(mode, item) {
+    state.fsMode = mode;
+    state.fsKey = item ? item.key : '';
+    el.fsList.textContent = '';
+    // 供输入框下拉提示：当前目录下的子文件夹
+    (state.subFolders || []).forEach(function (dir) {
+      var opt = document.createElement('option');
+      opt.value = dir.path;
+      el.fsList.appendChild(opt);
+    });
+    if (mode === 'move') {
+      el.fsTitle.textContent = '移动文件';
+      el.fsHint.textContent = '目标文件夹，留空表示根目录 · ' + (item ? item.name : '');
+      el.fsInput.value = item && item.folder ? item.folder : '';
+      el.fsOk.textContent = '移动';
+    } else {
+      el.fsTitle.textContent = '新建文件夹';
+      el.fsHint.textContent = '可用 / 分隔建多层，例如 工作/2026';
+      el.fsInput.value = state.folder ? state.folder + '/' : '';
+      el.fsOk.textContent = '创建';
+    }
+    el.fsModal.hidden = false;
+    setTimeout(function () {
+      try {
+        el.fsInput.focus();
+      } catch (err) {
+        /* 忽略 */
+      }
+    }, 0);
+  }
+
+  function closeFsModal() {
+    state.fsMode = '';
+    state.fsKey = '';
+    if (el.fsModal) el.fsModal.hidden = true;
+  }
+
+  function submitFsModal() {
+    var mode = state.fsMode;
+    if (!mode) return;
+    var value = String(el.fsInput.value || '').trim();
+    var store = currentStore();
+    el.fsOk.disabled = true;
+
+    var done = function () {
+      el.fsOk.disabled = false;
+      closeFsModal();
+    };
+
+    if (mode === 'move') {
+      var key = state.fsKey;
+      if (!key) return done();
+      api('POST', '/api/files/move', { key: key, folder: value }).then(
+        function () {
+          done();
+          toast('已移动到 ' + (value || '根目录'));
+          loadCloudFiles(true);
+        },
+        function (err) {
+          el.fsOk.disabled = false;
+          toast((err && err.message) || '移动失败');
+        },
+      );
+      return;
+    }
+
+    if (!value) {
+      el.fsOk.disabled = false;
+      return toast('请填写文件夹名称');
+    }
+    api('POST', '/api/files/folder', { store: store, path: value }).then(
+      function (data) {
+        done();
+        toast('已创建文件夹 ' + ((data && data.path) || value));
+        loadCloudFiles(true);
+      },
+      function (err) {
+        el.fsOk.disabled = false;
+        toast((err && err.message) || '创建文件夹失败');
+      },
+    );
+  }
+
+  // 删除文件夹：非空时二次确认后连带删除（服务端按前缀批量删）
+  function deleteFolder(dir) {
+    var store = currentStore();
+    var count = Number(dir.count) || 0;
+    var tip = count
+      ? '文件夹「' + dir.name + '」含 ' + count + ' 个文件（含子目录），删除后文件一并清除且不可恢复，确定删除？'
+      : '确定删除空文件夹「' + dir.name + '」？';
+    if (!window.confirm(tip)) return;
+    api('DELETE', '/api/files/folder?store=' + store + '&path=' + encodeURIComponent(dir.path)).then(
+      function (data) {
+        toast('已删除文件夹' + (data && data.deleted ? '（' + data.deleted + ' 个对象）' : ''));
+        // 删的正好是当前所在目录或其父级时，退回上一级
+        if (state.folder === dir.path || state.folder.indexOf(dir.path + '/') === 0) {
+          enterFolder('');
+        } else {
+          loadCloudFiles(true);
+        }
+      },
+      function (err) {
+        toast((err && err.message) || '删除文件夹失败');
+      },
+    );
+  }
+
   function renderCloudFiles() {
     if (!syncCloudVisibility()) return;
     var items = state.files || [];
+    var subFolders = state.subFolders || [];
     var shown = items.slice(0, 100);
     el.cloudFiles.hidden = false;
     el.cloudList.textContent = '';
-    el.cloudEmpty.hidden = items.length > 0;
-    el.cloudSub.textContent = items.length
-      ? '共 ' + items.length + ' 个' + (items.length > shown.length ? '，显示最近 ' + shown.length + ' 个' : '')
-      : '';
+    el.cloudEmpty.hidden = items.length > 0 || subFolders.length > 0;
+    el.cloudSub.textContent = subFolders.length
+      ? subFolders.length + ' 个文件夹 · ' + items.length + ' 个文件'
+      : items.length
+        ? '共 ' + items.length + ' 个' + (items.length > shown.length ? '，显示最近 ' + shown.length + ' 个' : '')
+        : '';
+
+    renderCrumbs();
+
+    // 子文件夹：整行可点进入，右侧只有删除
+    subFolders.forEach(function (dir) {
+      var row = document.createElement('div');
+      row.className = 'cf-row is-folder';
+      row.setAttribute('role', 'button');
+      row.tabIndex = 0;
+      row.title = '进入 ' + dir.path;
+
+      var thumb = document.createElement('div');
+      thumb.className = 'cf-thumb is-folder';
+      thumb.innerHTML =
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">' +
+        '<path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2.5h7A1.5 1.5 0 0 1 19 10v7a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 3 17z"/></svg>';
+
+      var meta = document.createElement('div');
+      meta.className = 'cf-meta';
+      var name = document.createElement('div');
+      name.className = 'cf-name';
+      name.textContent = dir.name;
+      name.title = dir.path;
+      var sub = document.createElement('div');
+      sub.className = 'cf-folder-meta';
+      sub.textContent = dir.count ? dir.count + ' 个文件 · ' + fmtSize(dir.bytes) : '空文件夹';
+      meta.appendChild(name);
+      meta.appendChild(sub);
+
+      var btns = document.createElement('div');
+      btns.className = 'cf-btns';
+      var delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.className = 'btn-ghost btn-sm cf-icon cf-danger';
+      delBtn.title = '删除文件夹';
+      delBtn.setAttribute('aria-label', '删除文件夹');
+      delBtn.innerHTML =
+        '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">' +
+        '<path d="M4 7h16"/><path d="M10 11v6"/><path d="M14 11v6"/>' +
+        '<path d="M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12"/>' +
+        '<path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>';
+      delBtn.addEventListener('click', function (event) {
+        event.stopPropagation();
+        deleteFolder(dir);
+      });
+      btns.appendChild(delBtn);
+
+      row.addEventListener('click', function () {
+        enterFolder(dir.path);
+      });
+      row.addEventListener('keydown', function (event) {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          enterFolder(dir.path);
+        }
+      });
+
+      row.appendChild(thumb);
+      row.appendChild(meta);
+      row.appendChild(btns);
+      el.cloudList.appendChild(row);
+    });
 
     shown.forEach(function (item) {
       var exp = Number(item.expireAt);
@@ -1614,6 +1896,21 @@
       });
       btns.appendChild(qrBtn);
 
+      var moveBtn = document.createElement('button');
+      moveBtn.type = 'button';
+      moveBtn.className = 'btn-ghost btn-sm cf-icon';
+      moveBtn.title = '移动到文件夹';
+      moveBtn.setAttribute('aria-label', '移动到文件夹');
+      moveBtn.innerHTML =
+        '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">' +
+        '<path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h3.6l2 2.5h7.4A1.5 1.5 0 0 1 19 10v1"/>' +
+        '<path d="M3 17.5V10.5"/><path d="M3 17.5A1.5 1.5 0 0 0 4.5 19h5"/>' +
+        '<path d="M14 15h7"/><path d="m18 12 3 3-3 3"/></svg>';
+      moveBtn.addEventListener('click', function () {
+        openFsModal('move', item);
+      });
+      btns.appendChild(moveBtn);
+
       var delBtn = document.createElement('button');
       delBtn.type = 'button';
       delBtn.className = 'btn-ghost btn-sm cf-icon cf-danger';
@@ -1653,16 +1950,28 @@
     el.cloudSub.textContent = '加载中…';
     el.cloudEmpty.hidden = true;
 
-    api('GET', '/api/files?store=' + store + (force ? '&refresh=1' : '')).then(
+    var folder = canSeeCloudFiles() ? state.folder || '' : '';
+    var query =
+      '/api/files?store=' +
+      store +
+      (folder ? '&folder=' + encodeURIComponent(folder) : '') +
+      (force ? '&refresh=1' : '');
+
+    api('GET', query).then(
       function (data) {
         if (reqId !== state.filesReqId) return;
         state.filesLoading = false;
         el.filesRefresh.disabled = false;
         state.filesAt = Date.now();
+        state.folder = (data && data.folder) || '';
+        state.folderByStore[store] = state.folder;
         state.files = (data && data.objects) || [];
+        state.subFolders = (data && data.folders) || [];
+        state.crumbs = (data && data.crumbs) || [];
         state.filesUsage = (data && data.usage) || null;
         renderUsage(state.filesUsage);
         renderCloudFiles();
+        syncShareTarget();
       },
       function (err) {
         if (reqId !== state.filesReqId) return;
@@ -2271,6 +2580,21 @@
       if (tab && tab.dataset && tab.dataset.store) switchStore(tab.dataset.store);
     });
 
+    el.cfNewFolder.addEventListener('click', function () {
+      openFsModal('newfolder');
+    });
+
+    el.fsOk.addEventListener('click', submitFsModal);
+    el.fsCancel.addEventListener('click', closeFsModal);
+    el.fsClose.addEventListener('click', closeFsModal);
+    el.fsMask.addEventListener('click', closeFsModal);
+    el.fsInput.addEventListener('keydown', function (event) {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        submitFsModal();
+      }
+    });
+
     el.previewClose.addEventListener('click', closePreview);
     el.previewMask.addEventListener('click', closePreview);
     el.previewDownload.addEventListener('click', function () {
@@ -2283,6 +2607,10 @@
     });
     document.addEventListener('keydown', function (event) {
       if (event.key !== 'Escape') return;
+      if (el.fsModal && !el.fsModal.hidden) {
+        closeFsModal();
+        return;
+      }
       if (!el.qrModal.hidden) {
         closeQrModal();
         return;

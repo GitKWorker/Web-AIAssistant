@@ -151,6 +151,7 @@
           <svg class="dropzone-icon" viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"/><path d="m7 9 5-5 5 5"/><path d="M4 16v2.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V16"/></svg>
           <div class="dropzone-title">点击选择文件，或拖拽到这里</div>
           <div class="dropzone-sub" id="share-hint">上传后生成链接，不占用服务器磁盘</div>
+          <div class="dz-target" id="share-target" hidden></div>
         </div>
 
         <div class="share-progress" id="share-progress" hidden>
@@ -191,8 +192,11 @@
 
         <div class="cloud-files" id="cloud-files" hidden>
           <div class="cf-head">
-            <span class="cf-title">云端文件</span>
-            <span class="cf-sub" id="cf-sub"></span>
+            <div class="cf-crumbs" id="cf-crumbs"></div>
+            <div class="cf-tools">
+              <button type="button" class="btn-ghost btn-sm" id="cf-newfolder">新建文件夹</button>
+              <span class="cf-sub" id="cf-sub"></span>
+            </div>
           </div>
           <div class="cf-list" id="cf-list"></div>
           <div class="cf-empty" id="cf-empty" hidden>还没有文件</div>
@@ -372,6 +376,25 @@
         <input type="text" id="qr-url" readonly>
         <button type="button" class="btn-ghost btn-sm" id="qr-copy">复制</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<div class="fs-modal" id="fs-modal" hidden>
+  <div class="fs-mask" id="fs-mask"></div>
+  <div class="fs-box" role="dialog" aria-modal="true" aria-labelledby="fs-title">
+    <div class="fs-head">
+      <span class="fs-title" id="fs-title">新建文件夹</span>
+      <button type="button" class="preview-close" id="fs-close" aria-label="关闭">×</button>
+    </div>
+    <div class="fs-body">
+      <div class="fs-hint" id="fs-hint">支持多层，用 / 分隔，例如 工作/2026</div>
+      <input type="text" id="fs-input" list="fs-list" placeholder="文件夹名称" autocomplete="off">
+      <datalist id="fs-list"></datalist>
+    </div>
+    <div class="fs-foot">
+      <button type="button" class="btn-ghost btn-sm" id="fs-cancel">取消</button>
+      <button type="button" class="btn-primary btn-sm" id="fs-ok">确定</button>
     </div>
   </div>
 </div>

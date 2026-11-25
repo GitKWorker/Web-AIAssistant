@@ -539,7 +539,16 @@ async function handleFileSign(req, res, session) {
 
   const name = r2.sanitizeFilename(body.name);
   const contentType = r2.safeMime(body.mime);
-  const key = r2.buildObjectKey(scene, name);
+  // 聊天附件不参与目录结构（消息里只有文件本身），share/keep 才接受 folder
+  let folder = '';
+  if (scene !== 'chat') {
+    try {
+      folder = r2.normalizeFolder(body.folder);
+    } catch (err) {
+      return fail(res, 400, 'INVALID_FOLDER', '文件夹名称无效（不能含 . 或 ..）');
+    }
+  }
+  const key = r2.buildObjectKey(scene, name, folder);
 
   let signed;
   try {
@@ -561,6 +570,7 @@ async function handleFileSign(req, res, session) {
     contentType,
     size,
     store,
+    folder,
     expiresIn: signed.expiresIn,
     expireAt: scene === 'keep' ? 0 : Date.now() + RETAIN_DAYS * 24 * 60 * 60 * 1000,
     retainDays: scene === 'keep' ? 0 : RETAIN_DAYS,
@@ -610,10 +620,11 @@ async function collectFiles(force, store) {
   if (!force && cache.data && Date.now() - cache.at < r2.LIST_CACHE_MS) {
     return Object.assign({}, cache.data, { cached: true });
   }
-  const { objects, truncated } = await r2.listObjects(store);
+  const { objects, markers, truncated } = await r2.listObjects(store);
   const data = {
     store,
     objects,
+    markers,
     truncated,
     usage: summarizeUsage(objects, store),
     fetchedAt: Date.now(),
@@ -621,6 +632,61 @@ async function collectFiles(force, store) {
   };
   fileListCache[store] = { at: Date.now(), data };
   return data;
+}
+
+// 把扁平对象列表切成"当前目录"视图：直接文件 + 一级子目录（计数只统计直属文件，
+// 与常见文件管理器一致；子目录里有内容时进去才看得到明细）。
+// 空目录靠 .folder 占位对象保留，markers 里出现即视为存在。
+function buildFolderView(payload, folder) {
+  const base = folder ? `${folder}/` : '';
+  const childMap = new Map();
+  const files = [];
+
+  const topNameOf = (path) => {
+    if (!path) return null;
+    if (base) {
+      if (path.indexOf(base) !== 0) return null;
+      const rest = path.slice(base.length);
+      return rest ? rest.split('/')[0] : null;
+    }
+    return path.split('/')[0];
+  };
+
+  for (const o of payload.objects) {
+    if (o.folder === folder) {
+      files.push(o);
+      continue;
+    }
+    const top = topNameOf(o.folder);
+    if (!top) continue;
+    const entry = childMap.get(top) || { name: top, path: base + top, count: 0, bytes: 0 };
+    entry.count += 1;
+    entry.bytes += Number(o.size) || 0;
+    childMap.set(top, entry);
+  }
+
+  for (const marker of payload.markers || []) {
+    const top = topNameOf(marker);
+    if (!top || childMap.has(top)) continue;
+    childMap.set(top, { name: top, path: base + top, count: 0, bytes: 0 });
+  }
+
+  const folders = Array.from(childMap.values()).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  const crumbs = folder
+    ? folder.split('/').map((name, i, arr) => ({ name, path: arr.slice(0, i + 1).join('/') }))
+    : [];
+
+  return {
+    store: payload.store,
+    folder,
+    crumbs,
+    folders,
+    objects: files,
+    usage: payload.usage,
+    truncated: payload.truncated,
+    fetchedAt: payload.fetchedAt,
+    cached: payload.cached,
+  };
 }
 
 // 对象键合法性：只接受我们签出的 <scene>/<hex>/<name> 结构
@@ -650,10 +716,16 @@ async function handleFileList(req, res, url) {
   if (!r2.isConfigured(store)) {
     return fail(res, 503, 'FILE_UPLOAD_DISABLED', store === 'keep' ? '永久存储未启用' : '文件功能未启用');
   }
+  let folder = '';
+  try {
+    folder = r2.normalizeFolder(url.searchParams.get('folder') || '');
+  } catch (err) {
+    return fail(res, 400, 'INVALID_FOLDER', '文件夹路径无效');
+  }
   const force = url.searchParams.get('refresh') === '1';
   try {
     const payload = await collectFiles(force, store);
-    return sendJson(res, 200, payload);
+    return sendJson(res, 200, buildFolderView(payload, folder));
   } catch (err) {
     console.error('[files] 列表读取失败：', err.message);
     const msg = /^LIST_FAILED_403/.test(err.message)
@@ -769,6 +841,114 @@ async function handleFileDelete(req, res, url) {
   fileListCache[store] = { at: 0, data: null };
   console.log(`[files] 已删除 ${key}（${target.name}，${target.size} 字节）`);
   return sendJson(res, 200, { ok: true, key, name: target.name });
+}
+
+// 新建文件夹：对象存储没有真目录，写一个 0 字节的 .folder 占位对象即可让空目录存在。
+async function handleFolderCreate(req, res) {
+  let body;
+  try {
+    body = await readBody(req, 8 * 1024);
+  } catch (err) {
+    return fail(res, 400, 'INVALID_INPUT', err.message === 'BODY_TOO_LARGE' ? '请求体过大' : '请求格式错误');
+  }
+  const store = body.store === 'keep' ? 'keep' : 'tmp';
+  if (!r2.isConfigured(store)) {
+    return fail(res, 503, 'FILE_UPLOAD_DISABLED', store === 'keep' ? '永久存储未启用' : '文件功能未启用');
+  }
+  let folder = '';
+  try {
+    folder = r2.normalizeFolder(body.path);
+  } catch (err) {
+    return fail(res, 400, 'INVALID_FOLDER', '文件夹名称无效（不能含 . 或 ..）');
+  }
+  if (!folder) {
+    return fail(res, 400, 'INVALID_FOLDER', '请填写文件夹名称');
+  }
+  try {
+    await r2.createFolder(store, folder);
+  } catch (err) {
+    console.error('[files] 建文件夹失败：', err.message);
+    return fail(res, 502, 'FOLDER_CREATE_FAILED', '创建文件夹失败，请稍后重试');
+  }
+  fileListCache[store] = { at: 0, data: null };
+  console.log(`[files] 已创建文件夹 ${store}:${folder}`);
+  return sendJson(res, 200, { ok: true, store, path: folder });
+}
+
+// 删除文件夹：连带删除该前缀下所有对象（含子目录与占位文件）。仅管理员，前端已做二次确认。
+async function handleFolderDelete(req, res, url) {
+  const store = url.searchParams.get('store') === 'keep' ? 'keep' : 'tmp';
+  if (!r2.isConfigured(store)) {
+    return fail(res, 503, 'FILE_UPLOAD_DISABLED', '文件功能未启用');
+  }
+  let folder = '';
+  try {
+    folder = r2.normalizeFolder(url.searchParams.get('path') || '');
+  } catch (err) {
+    return fail(res, 400, 'INVALID_FOLDER', '文件夹路径无效');
+  }
+  if (!folder) {
+    return fail(res, 400, 'INVALID_FOLDER', '不能删除根目录');
+  }
+  const prefix = `${r2.folderRootOf(store)}/${folder}/`;
+  let deleted = 0;
+  try {
+    deleted = await r2.deletePrefix(store, prefix);
+  } catch (err) {
+    console.error('[files] 删除文件夹失败：', err.message);
+    return fail(res, 502, 'FOLDER_DELETE_FAILED', '删除文件夹失败，请稍后重试');
+  }
+  fileListCache[store] = { at: 0, data: null };
+  console.log(`[files] 已删除文件夹 ${store}:${folder}，共 ${deleted} 个对象`);
+  return sendJson(res, 200, { ok: true, store, path: folder, deleted });
+}
+
+// 移动文件到指定文件夹（服务端 CopyObject + Delete，字节不过本机）
+async function handleFileMove(req, res) {
+  let body;
+  try {
+    body = await readBody(req, 8 * 1024);
+  } catch (err) {
+    return fail(res, 400, 'INVALID_INPUT', err.message === 'BODY_TOO_LARGE' ? '请求体过大' : '请求格式错误');
+  }
+  const key = String(body.key || '').trim();
+  const store = r2.storeFromKey(key);
+  if (!r2.isConfigured(store)) {
+    return fail(res, 503, 'FILE_UPLOAD_DISABLED', '文件功能未启用');
+  }
+  if (!isValidFileKey(key)) {
+    return fail(res, 400, 'INVALID_KEY', '文件标识无效');
+  }
+  let folder = '';
+  try {
+    folder = r2.normalizeFolder(body.folder);
+  } catch (err) {
+    return fail(res, 400, 'INVALID_FOLDER', '目标文件夹名称无效（不能含 . 或 ..）');
+  }
+
+  let target = null;
+  try {
+    target = await findFile(key);
+  } catch (err) {
+    console.error('[files] 移动前校验失败：', err.message);
+    return fail(res, 502, 'LIST_FAILED', '读取文件信息失败');
+  }
+  if (!target) {
+    return fail(res, 404, 'NOT_FOUND', '文件不存在或已过期清理');
+  }
+  if (target.scene === 'chat') {
+    return fail(res, 400, 'FOLDER_UNSUPPORTED', '聊天附件不支持移动');
+  }
+
+  try {
+    const moved = await r2.moveObject(store, key, folder, target.name);
+    fileListCache[store] = { at: 0, data: null };
+    console.log(`[files] 已移动 ${key} → ${moved.key}`);
+    return sendJson(res, 200, { ok: true, store, from: key, key: moved.key, folder: moved.folder });
+  } catch (err) {
+    console.error('[files] 移动失败：', err.message);
+    return fail(res, 502, 'MOVE_FAILED', '移动失败，请稍后重试');
+  }
 }
 
 // 校验前端回传的文件元数据：只接受我们自己签出的 key 前缀，且 URL 必须落在公开域上，
@@ -960,6 +1140,24 @@ async function handleApi(req, res, url) {
     const session = requireAdmin(req, res, '仅管理员可以删除云端文件');
     if (!session) return undefined;
     return handleFileDelete(req, res, url);
+  }
+
+  if (route === 'POST /api/files/folder') {
+    const session = requireAdmin(req, res, '仅管理员可以管理文件夹');
+    if (!session) return undefined;
+    return handleFolderCreate(req, res);
+  }
+
+  if (route === 'DELETE /api/files/folder') {
+    const session = requireAdmin(req, res, '仅管理员可以管理文件夹');
+    if (!session) return undefined;
+    return handleFolderDelete(req, res, url);
+  }
+
+  if (route === 'POST /api/files/move') {
+    const session = requireAdmin(req, res, '仅管理员可以移动云端文件');
+    if (!session) return undefined;
+    return handleFileMove(req, res);
   }
 
   // 扫码下载走免登录：手机扫码没有登录态，key 本身即凭证
